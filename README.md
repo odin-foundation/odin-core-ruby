@@ -1,6 +1,6 @@
 # odin-foundation
 
-[![Gem](https://img.shields.io/gem/v/odin-foundation)](https://rubygems.org/gems/odin-foundation) [![License](https://img.shields.io/badge/license-MIT-blue)](https://github.com/odin-foundation/odin-core-ruby/blob/main/LICENSE)
+[![Gem](https://img.shields.io/gem/v/odin-foundation)](https://rubygems.org/gems/odin-foundation) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/odin-foundation/odin-core-ruby/blob/main/LICENSE)
 
 Official Ruby SDK for [ODIN](https://odin.foundation) (Open Data Interchange Notation) — a canonical data model for transporting meaning between systems, standards, and AI.
 

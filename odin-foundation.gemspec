@@ -9,7 +9,7 @@ Gem::Specification.new do |s|
   s.description = "Ruby SDK for parsing, serializing, validating, and transforming ODIN documents"
   s.authors     = ["ODIN Foundation"]
   s.homepage    = "https://odin.foundation"
-  s.license     = "MIT"
+  s.license     = "Apache-2.0"
   s.required_ruby_version = ">= 3.1"
   s.files       = Dir["lib/**/*.rb"]
 
