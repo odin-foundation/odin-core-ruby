@@ -1,0 +1,26 @@
+# Bundle
+/.bundle/
+vendor/bundle/
+
+# Gem build
+*.gem
+pkg/
+
+# Test & coverage
+coverage/
+.rspec_status
+
+# Temp
+tmp/
+*.tmp
+
+# IDE
+.idea/
+.vscode/
+
+# Dev planning
+plan/
+
+# OS
+.DS_Store
+Thumbs.db

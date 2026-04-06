@@ -1,0 +1,49 @@
+name: Publish to RubyGems
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: rubygems
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+
+      - name: Check if version already published
+        id: check
+        run: |
+          VERSION=$(ruby -r ./lib/odin/version -e "puts Odin::VERSION")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if gem info odin-foundation --remote --exact 2>/dev/null | grep -q "${VERSION}"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test (unit tests only — golden tests run in Azure DevOps)
+        if: steps.check.outputs.exists == 'false'
+        run: bundle exec rspec --exclude-pattern 'spec/golden/**'
+
+      - name: Build gem
+        if: steps.check.outputs.exists == 'false'
+        run: gem build odin-foundation.gemspec
+
+      - name: Configure RubyGems credentials
+        if: steps.check.outputs.exists == 'false'
+        uses: rubygems/configure-rubygems-credentials@main
+        with:
+          gem-server: https://rubygems.org
+
+      - name: Publish
+        if: steps.check.outputs.exists == 'false'
+        run: gem push odin-foundation-${{ steps.check.outputs.version }}.gem
