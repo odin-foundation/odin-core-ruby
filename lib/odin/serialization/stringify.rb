@@ -325,6 +325,22 @@ module Odin
           return false if idx != i
         end
 
+        # Reject tabular if any indexed sub-array column (`field[N]`) is sparse —
+        # padding shorter rows with empty cells loses to the nested record-block form.
+        all_columns.each do |col|
+          next unless col.end_with?("]")
+
+          open_idx = col.rindex("[")
+          next if open_idx.nil? || open_idx <= 0
+
+          inner = col[(open_idx + 1)...(col.length - 1)]
+          next if inner.empty? || !inner.match?(/\A\d+\z/)
+
+          items.each_value do |fields|
+            return false unless fields.key?(col)
+          end
+        end
+
         columns = all_columns
         columns.sort! if @sort_paths
 
