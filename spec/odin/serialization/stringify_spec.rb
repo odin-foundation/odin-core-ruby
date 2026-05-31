@@ -188,10 +188,10 @@ RSpec.describe Odin::Serialization::Stringify do
       expect(stringify(doc, use_headers: false)).to include('-"val"')
     end
 
-    it "formats combined modifiers in canonical order !*-" do
+    it "formats combined modifiers in canonical order !-*" do
       mods = Odin::Types::OdinModifiers.new(required: true, confidential: true, deprecated: true)
       doc = build_doc { |b| b.set_string("important", "secret", modifiers: mods) }
-      expect(stringify(doc, use_headers: false)).to include('!*-"secret"')
+      expect(stringify(doc, use_headers: false)).to include('!-*"secret"')
     end
 
     it "formats !* combination" do
@@ -206,10 +206,10 @@ RSpec.describe Odin::Serialization::Stringify do
       expect(stringify(doc, use_headers: false)).to include('!-"v"')
     end
 
-    it "formats *- combination" do
+    it "formats -* combination" do
       mods = Odin::Types::OdinModifiers.new(confidential: true, deprecated: true)
       doc = build_doc { |b| b.set_string("x", "v", modifiers: mods) }
-      expect(stringify(doc, use_headers: false)).to include('*-"v"')
+      expect(stringify(doc, use_headers: false)).to include('-*"v"')
     end
 
     it "no modifiers means no prefix" do

@@ -268,12 +268,13 @@ module Odin
 
     # Transform result
     class TransformResult
-      attr_reader :output, :formatted, :errors, :output_dv
+      attr_reader :output, :formatted, :errors, :warnings, :output_dv
 
-      def initialize(output:, formatted: nil, errors: [], output_dv: nil)
+      def initialize(output:, formatted: nil, errors: [], warnings: [], output_dv: nil)
         @output = output
         @formatted = formatted
         @errors = errors
+        @warnings = warnings
         @output_dv = output_dv
       end
 

@@ -54,6 +54,16 @@ module Odin
       end
     end
 
+    class DecimalPlacesConstraint
+      attr_reader :places, :kind
+
+      def initialize(places:)
+        @kind = :decimal_places
+        @places = places
+        freeze
+      end
+    end
+
     class PatternConstraint
       attr_reader :pattern, :message, :kind
 

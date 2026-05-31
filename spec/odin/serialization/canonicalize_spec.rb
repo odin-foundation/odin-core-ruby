@@ -256,10 +256,10 @@ RSpec.describe Odin::Serialization::Canonicalize do
       expect(canonicalize(doc)).to include('-"legacy"')
     end
 
-    it "formats combined modifiers in canonical order !*-" do
+    it "formats combined modifiers in canonical order !-*" do
       mods = Odin::Types::OdinModifiers.new(required: true, confidential: true, deprecated: true)
       doc = build_doc { |b| b.set_string("important", "secret", modifiers: mods) }
-      expect(canonicalize(doc)).to include('!*-"secret"')
+      expect(canonicalize(doc)).to include('!-*"secret"')
     end
   end
 

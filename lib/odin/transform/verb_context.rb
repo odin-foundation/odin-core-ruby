@@ -16,8 +16,10 @@ module Odin
                     :loop_depth,      # Integer — nesting depth for security
                     :field_modifiers, # Hash<String, Array<Symbol>> — tracked field modifiers
                     :errors,          # Array<TransformEngine::TransformError> — collected errors
+                    :warnings,        # Array<String> — collected warnings
                     :source_format,   # String — source format for directive handling
-                    :on_validation    # String — validation policy (fail / warn / skip)
+                    :on_validation,   # String — validation policy (fail / warn / skip)
+                    :on_missing       # String — missing-data policy (fail / warn / skip / default)
 
       MAX_LOOP_DEPTH = 10
 
@@ -35,8 +37,10 @@ module Odin
         @loop_depth = 0
         @field_modifiers = {}
         @errors = []
+        @warnings = []
         @source_format = ""
         @on_validation = nil
+        @on_missing = nil
       end
 
       def next_sequence(name)
@@ -82,8 +86,10 @@ module Odin
         ctx.loop_depth = @loop_depth + 1
         ctx.field_modifiers = @field_modifiers # shared reference
         ctx.errors = @errors # shared reference
+        ctx.warnings = @warnings # shared reference
         ctx.source_format = @source_format
         ctx.on_validation = @on_validation
+        ctx.on_missing = @on_missing
         ctx
       end
     end

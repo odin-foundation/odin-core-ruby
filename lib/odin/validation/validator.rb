@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "base64"
+
 module Odin
   module Validation
     class Validator
@@ -20,6 +22,9 @@ module Odin
 
         # V003: Bounds constraints
         check_bounds_constraints
+
+        # V003: Decimal places (#.N)
+        check_decimal_places_constraints
 
         # V004: Pattern constraints
         check_pattern_constraints
@@ -320,9 +325,59 @@ module Odin
         elsif value.string?
           len = value.value.length
           check_numeric_bounds(path, len, constraint, label: "length")
+        elsif value.is_a?(Types::OdinBinary)
+          check_binary_bounds(path, value, constraint)
         elsif value.date? || value.timestamp?
           check_date_bounds(path, value, constraint)
         end
+      end
+
+      def check_decimal_places_constraints
+        each_schema_field_with_constraints(:decimal_places) do |path, _field, value, constraint|
+          next if value.nil? || value.null?
+          next unless value.numeric?
+
+          raw = (value.respond_to?(:raw) && value.raw) || value.value.to_s
+          dot = raw.index(".")
+          actual = dot ? raw.length - dot - 1 : 0
+          next if actual == constraint.places
+
+          add_error(
+            code: Errors::ValidationErrorCode::VALUE_OUT_OF_BOUNDS,
+            path: path,
+            message: "Decimal places mismatch at '#{path}': expected exactly #{constraint.places}",
+            expected: constraint.places.to_s,
+            actual: actual.to_s
+          )
+        end
+      end
+
+      def check_binary_bounds(path, value, constraint)
+        len = binary_byte_length(value)
+        if constraint.min && len < constraint.min.to_i
+          add_error(
+            code: Errors::ValidationErrorCode::VALUE_OUT_OF_BOUNDS,
+            path: path,
+            message: "Binary size #{len} is below minimum #{constraint.min} at '#{path}'",
+            expected: ">= #{constraint.min}",
+            actual: len.to_s
+          )
+        end
+        if constraint.max && len > constraint.max.to_i
+          add_error(
+            code: Errors::ValidationErrorCode::VALUE_OUT_OF_BOUNDS,
+            path: path,
+            message: "Binary size #{len} exceeds maximum #{constraint.max} at '#{path}'",
+            expected: "<= #{constraint.max}",
+            actual: len.to_s
+          )
+        end
+      end
+
+      def binary_byte_length(value)
+        Base64.decode64(value.data).bytesize
+      rescue StandardError
+        value.data.to_s.bytesize
       end
 
       def check_numeric_bounds(path, num, constraint, label: "value")
@@ -817,11 +872,10 @@ module Odin
             cond_field_path = resolve_conditional_field(path, cond.field)
             cond_value = @doc.get(cond_field_path)
 
-            # If condition field doesn't exist, skip
-            next unless cond_value
-
-            # Evaluate the condition
-            is_met = cond.evaluate(extract_value_for_comparison(cond_value))
+            # Evaluate the condition; an absent field compares as no-match,
+            # which :unless inverts into a requirement.
+            compare_value = cond_value ? extract_value_for_comparison(cond_value) : nil
+            is_met = cond.evaluate(compare_value)
 
             if is_met && field.required && !doc_has_value?(path)
               add_error(

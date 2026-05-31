@@ -97,9 +97,9 @@ RSpec.describe Odin::Utils::FormatUtils do
       expect(fu.format_modifier_prefix(mods)).to eq("-")
     end
 
-    it "formats combined in canonical order !*-" do
+    it "formats combined in canonical order !-*" do
       mods = Odin::Types::OdinModifiers.new(required: true, confidential: true, deprecated: true)
-      expect(fu.format_modifier_prefix(mods)).to eq("!*-")
+      expect(fu.format_modifier_prefix(mods)).to eq("!-*")
     end
 
     it "formats !* combination" do
@@ -112,9 +112,9 @@ RSpec.describe Odin::Utils::FormatUtils do
       expect(fu.format_modifier_prefix(mods)).to eq("!-")
     end
 
-    it "formats *- combination" do
+    it "formats -* combination" do
       mods = Odin::Types::OdinModifiers.new(confidential: true, deprecated: true)
-      expect(fu.format_modifier_prefix(mods)).to eq("*-")
+      expect(fu.format_modifier_prefix(mods)).to eq("-*")
     end
   end
 

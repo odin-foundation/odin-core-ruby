@@ -766,8 +766,10 @@ module Odin
           return [Types::SchemaFieldType::PERCENT, text[2..].to_s.strip, nil, nil]
         elsif text.start_with?("#")
           rest = text[1..].to_s.strip
-          if rest.start_with?(".") && rest.length > 1 && rest[1]&.match?(/\d/)
-            return [Types::SchemaFieldType::NUMBER, rest[2..].to_s.strip, nil, nil]
+          # Decimal places spec (#.N) — preserve as a constraint token
+          dp_match = rest.match(/\A\.(\d+)/)
+          if dp_match
+            rest = ":dp#{dp_match[1]}#{rest[dp_match[0].length..]}"
           end
           return [Types::SchemaFieldType::NUMBER, rest, nil, nil]
         elsif text.start_with?("?")
@@ -784,7 +786,11 @@ module Odin
           ref = name.empty? ? nil : "@#{name}"
           return [Types::SchemaFieldType::REFERENCE, remaining, nil, ref]
         elsif text.start_with?("^")
-          return [Types::SchemaFieldType::BINARY, text[1..].to_s.strip, nil, nil]
+          rest = text[1..].to_s.strip
+          # Strip an optional algorithm tag (e.g. ^sha256:(32)) before constraints
+          algo_match = rest.match(/\A([A-Za-z0-9]+):(?=\()/)
+          rest = ":#{rest[(algo_match[0].length)..]}" if algo_match
+          return [Types::SchemaFieldType::BINARY, rest, nil, nil]
         elsif text.start_with?("~")
           return [Types::SchemaFieldType::NULL, text[1..].to_s.strip, nil, nil]
         elsif text.start_with?('"')
@@ -870,6 +876,9 @@ module Odin
             else
               text = rest
             end
+          elsif (dp = text.match(/\A:dp(\d+)/))
+            constraints << Types::DecimalPlacesConstraint.new(places: dp[1].to_i)
+            text = text[dp[0].length..].to_s.strip
           elsif text.start_with?(":if ") || text.start_with?(":unless ")
             break # Conditionals handled separately
           elsif text.start_with?(":computed") || text.start_with?(":immutable")

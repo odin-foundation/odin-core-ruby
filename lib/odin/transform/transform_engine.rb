@@ -110,7 +110,7 @@ module Odin
         # 7. Convert output to plain Ruby for result (DynValues -> native Ruby)
         plain_output = deep_to_ruby(output)
 
-        TransformResult.new(output: plain_output, formatted: formatted, output_dv: output_dv, errors: context.errors)
+        TransformResult.new(output: plain_output, formatted: formatted, output_dv: output_dv, errors: context.errors, warnings: context.warnings)
       end
 
       # ── Multi-Record Execution (discriminator-based routing) ──
@@ -206,7 +206,7 @@ module Odin
         # Convert output to plain Ruby
         plain_output = deep_to_ruby(output)
 
-        TransformResult.new(output: plain_output, formatted: formatted, output_dv: output_dv, errors: context.errors)
+        TransformResult.new(output: plain_output, formatted: formatted, output_dv: output_dv, errors: context.errors, warnings: context.warnings)
       end
 
       private def parse_discriminator_config(config)
@@ -464,6 +464,8 @@ module Odin
         context.source_format = transform_def.source_format || ""
         ov = transform_def.header.target_options["onValidation"]
         context.on_validation = ov if ov && !ov.empty?
+        om = transform_def.header.target_options["onMissing"]
+        context.on_missing = om if om && !om.empty?
 
         # Initialize constants
         transform_def.constants.each do |key, val|
@@ -481,6 +483,19 @@ module Odin
         end
 
         context
+      end
+
+      # Report a lookup miss honoring the on_missing policy.
+      # Defaults to silent null; raises only when on_missing is fail/warn.
+      def report_lookup_miss(context, table_name, key)
+        case context.on_missing
+        when "fail"
+          context.errors << TransformError.new(
+            "Lookup key not found in table '#{table_name}': #{key}", code: "T011"
+          )
+        when "warn"
+          context.warnings << "Lookup key not found in table '#{table_name}': #{key}"
+        end
       end
 
       def reset_non_persist_accumulators(context, accumulator_defs)
@@ -711,6 +726,10 @@ module Odin
             return if evaluate_condition(unless_dir.value.to_s, source, context)
           end
 
+          # A :default modifier handles a missing lookup; suppress errors raised during evaluation.
+          has_default = mapping.directives.any? { |d| d.name == "default" }
+          errors_before = has_default ? context.errors.length : 0
+
           # :object builds a nested object from an inline {key = @path, …} spec.
           object_dir = mapping.directives.find { |d| d.name == "object" }
           if object_dir
@@ -746,6 +765,11 @@ module Odin
               next if %w[pos len field trim if unless object raw array cdata validate enum range].include?(directive.name)
               val = apply_directive(val, directive, source, context)
             end
+          end
+
+          # If a :default rescued a null result, drop errors raised during evaluation.
+          if has_default && context.errors.length > errors_before
+            context.errors.slice!(errors_before..)
           end
 
           # Validation modifiers: :validate / :enum / :range (honors onValidation policy).
@@ -2281,16 +2305,23 @@ module Odin
           table_name = table_ref[0...dot_index]
           return_column = table_ref[(dot_index + 1)..]
 
-          table = ctx.get_table(table_name)
-          return Types::DynValue.of_null unless table
-
           # Get match values (all args after table ref)
           match_values = args[1..].map { |a| a&.to_string || "" }
+          match_key = match_values.join(", ")
+
+          table = ctx.get_table(table_name)
+          unless table
+            report_lookup_miss(ctx, table_name, match_key)
+            return Types::DynValue.of_null
+          end
 
           # Build list of match columns (all columns except return column)
           columns = table.columns
           return_col_index = columns.index(return_column)
-          return Types::DynValue.of_null unless return_col_index
+          unless return_col_index
+            report_lookup_miss(ctx, table_name, match_key)
+            return Types::DynValue.of_null
+          end
 
           match_col_names = columns.reject { |c| c == return_column }
 
@@ -2312,6 +2343,7 @@ module Odin
             end
           end
 
+          report_lookup_miss(ctx, table_name, match_key)
           Types::DynValue.of_null
         }
 

@@ -30,16 +30,16 @@ module Odin
       # ─────────────────────────────────────────────────────────────────────
 
       # Pre-computed modifier prefix lookup table (indexed by bit flags)
-      # Bit 2 = required, bit 1 = confidential, bit 0 = deprecated
-      MODIFIER_PREFIXES = ["", "-", "*", "*-", "!", "!-", "!*", "!*-"].freeze
+      # Bit 2 = required, bit 1 = deprecated, bit 0 = confidential
+      MODIFIER_PREFIXES = ["", "*", "-", "-*", "!", "!*", "!-", "!-*"].freeze
 
-      # Format modifier prefix in canonical order: ! (required), * (confidential), - (deprecated)
+      # Format modifier prefix in canonical order: ! (required), - (deprecated), * (confidential)
       def self.format_modifier_prefix(modifiers)
         return "" unless modifiers
         idx = 0
         idx |= 4 if modifiers.required
-        idx |= 2 if modifiers.confidential
-        idx |= 1 if modifiers.deprecated
+        idx |= 2 if modifiers.deprecated
+        idx |= 1 if modifiers.confidential
         MODIFIER_PREFIXES[idx]
       end
 
@@ -79,8 +79,8 @@ module Odin
         Types::OdinNull => ->(v) { "~" },
         Types::OdinBoolean => ->(v) { v.value ? "true" : "false" },
         Types::OdinString => ->(v) { format_quoted_string(v.value) },
-        Types::OdinNumber => ->(v) { "##{format_canonical_number(v.value)}" },
-        Types::OdinInteger => ->(v) { "###{v.value}" },
+        Types::OdinNumber => ->(v) { "##{format_canonical_number(v.raw || v.value)}" },
+        Types::OdinInteger => ->(v) { "###{v.raw || v.value}" },
         Types::OdinCurrency => ->(v) { format_canonical_currency(v) },
         Types::OdinPercent => ->(v) { v.raw ? "#%#{v.raw}" : "#%#{v.value}" },
         Types::OdinDate => ->(v) { v.raw },
@@ -104,11 +104,9 @@ module Odin
       # ─────────────────────────────────────────────────────────────────────
 
       # Format number in canonical form: strip trailing zeros.
-      # Uses String() representation then removes unnecessary zeros.
+      # Prefers the raw string (when passed) to preserve precision beyond Float range.
       def self.format_canonical_number(value)
-        s = value.to_s
-        # Ruby's Float#to_s already produces clean output like "3.14", "42.0"
-        # But we need to handle the case where it produces "3.14" correctly
+        s = value.is_a?(String) ? value : value.to_s
         if s.include?(".") && !s.include?("e") && !s.include?("E")
           s = s.sub(/\.?0+\z/, "")
         end
@@ -136,13 +134,31 @@ module Odin
         end
       end
 
-      # Canonical currency: always min 2 decimal places, code uppercase
+      # Canonical currency: always min 2 decimal places, code uppercase.
+      # Prefers raw to preserve precision and integer parts beyond Float range.
       def self.format_canonical_currency(value)
-        dp = [value.decimal_places, 2].max
-        formatted = format("%.#{dp}f", value.value.to_f)
-        result = +"#$#{formatted}"
+        result = +"#$#{format_canonical_currency_number(value)}"
         result << ":#{value.currency_code.upcase}" if value.currency_code
         result
+      end
+
+      # Build the numeric portion of a canonical currency, at least 2 decimal places.
+      def self.format_canonical_currency_number(value)
+        if value.raw
+          raw = value.raw
+          # Defensive: drop any code suffix that leaked into raw
+          raw = raw.split(":", 2)[0] if raw.include?(":")
+          negative = raw.start_with?("-")
+          unsigned = negative ? raw[1..] : raw
+          dot = unsigned.index(".")
+          int_part = dot ? unsigned[0...dot] : unsigned
+          frac_part = dot ? unsigned[(dot + 1)..] : ""
+          frac_part = frac_part.ljust(2, "0") if frac_part.length < 2
+          "#{negative ? '-' : ''}#{int_part}.#{frac_part}"
+        else
+          dp = [value.decimal_places, 2].max
+          format("%.#{dp}f", value.value.to_f)
+        end
       end
 
       # ─────────────────────────────────────────────────────────────────────
