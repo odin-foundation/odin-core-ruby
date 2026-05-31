@@ -914,11 +914,35 @@ module Odin
           parse_verb_expr(tokens)
         elsif token.start_with?("@")
           parse_copy_expr(tokens)
+        elsif (prefixed = parse_prefixed_reference(token))
+          tokens.shift
+          [prefixed, tokens]
         elsif token.start_with?(":")
           [LiteralExpr.new(Types::DynValue.of_null), tokens]
         else
           parse_literal_expr(tokens)
         end
+      end
+
+      PREFIX_REF_TYPES = {
+        "##" => "integer",
+        '#$' => "currency",
+        '#%' => "percent",
+        "#"  => "number"
+      }.freeze
+
+      # A typed prefix on a reference (##@.x, #$@.x, #%@.x, #@.x) copies the
+      # source value and coerces it to the prefix type on output.
+      def parse_prefixed_reference(token)
+        ["##", '#$', '#%', "#"].each do |prefix|
+          next unless token.start_with?(prefix)
+          rest = token[prefix.length..]
+          next unless rest.start_with?("@")
+
+          path = rest == "@" ? "" : rest[1..]
+          return CopyExpr.new(path, directives: [OdinDirective.new("type", PREFIX_REF_TYPES[prefix])])
+        end
+        nil
       end
 
       def parse_verb_expr(tokens)
@@ -1068,7 +1092,34 @@ module Odin
       # ── Helpers ──
 
       def unescape_string(s)
-        s.gsub("\\n", "\n").gsub("\\r", "\r").gsub("\\t", "\t").gsub('\\"', '"').gsub("\\\\", "\\")
+        result = +""
+        i = 0
+        len = s.length
+        while i < len
+          ch = s[i]
+          if ch == "\\" && i + 1 < len
+            nxt = s[i + 1]
+            case nxt
+            when "n" then result << "\n"; i += 2
+            when "r" then result << "\r"; i += 2
+            when "t" then result << "\t"; i += 2
+            when '"' then result << '"'; i += 2
+            when "\\" then result << "\\"; i += 2
+            when "$"
+              # Literal dollar; keep the backslash before `${` so the
+              # interpolation layer treats it as an escaped marker.
+              result << (s[i + 2] == "{" ? "\\$" : "$")
+              i += 2
+            else
+              result << ch << nxt
+              i += 2
+            end
+          else
+            result << ch
+            i += 1
+          end
+        end
+        result
       end
 
       def unquote(val)

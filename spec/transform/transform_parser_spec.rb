@@ -229,6 +229,63 @@ RSpec.describe Odin::Transform::TransformParser do
     end
   end
 
+  # ── Expression Parsing: Prefixed References ──
+
+  describe "prefixed reference parsing" do
+    it "parses ##@.year as a copy with an integer type directive" do
+      expr, = parser.parse_expression_string("##@.year")
+      expect(expr).to be_a(Odin::Transform::CopyExpr)
+      expect(expr.source_path).to eq(".year")
+      type_dir = expr.directives.find { |d| d.name == "type" }
+      expect(type_dir.value).to eq("integer")
+    end
+
+    it 'parses #$@.premium as a copy with a currency type directive' do
+      expr, = parser.parse_expression_string('#$@.premium')
+      expect(expr).to be_a(Odin::Transform::CopyExpr)
+      expect(expr.source_path).to eq(".premium")
+      type_dir = expr.directives.find { |d| d.name == "type" }
+      expect(type_dir.value).to eq("currency")
+    end
+
+    it 'parses #%@.pct as a copy with a percent type directive' do
+      expr, = parser.parse_expression_string('#%@.pct')
+      expect(expr).to be_a(Odin::Transform::CopyExpr)
+      expect(expr.source_path).to eq(".pct")
+      type_dir = expr.directives.find { |d| d.name == "type" }
+      expect(type_dir.value).to eq("percent")
+    end
+
+    it "parses #@.rate as a copy with a number type directive" do
+      expr, = parser.parse_expression_string("#@.rate")
+      expect(expr).to be_a(Odin::Transform::CopyExpr)
+      expect(expr.source_path).to eq(".rate")
+      type_dir = expr.directives.find { |d| d.name == "type" }
+      expect(type_dir.value).to eq("number")
+    end
+
+    it "leaves a plain integer literal unchanged" do
+      expr, = parser.parse_expression_string("##2021")
+      expect(expr).to be_a(Odin::Transform::LiteralExpr)
+    end
+  end
+
+  # ── String Escapes ──
+
+  describe "string escape decoding" do
+    it "decodes \\$ to a literal dollar sign" do
+      expect(parser.send(:unescape_string, 'Total: \\$5')).to eq("Total: $5")
+    end
+
+    it "preserves the backslash before an escaped \\${ marker" do
+      expect(parser.send(:unescape_string, '\\${x}')).to eq('\\${x}')
+    end
+
+    it "decodes standard escapes" do
+      expect(parser.send(:unescape_string, 'a\\nb\\tc')).to eq("a\nb\tc")
+    end
+  end
+
   # ── Expression Parsing: Simple Verbs ──
 
   describe "simple verb expression parsing" do

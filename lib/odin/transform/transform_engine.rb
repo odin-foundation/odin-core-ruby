@@ -288,7 +288,11 @@ module Odin
       def evaluate(expr, context)
         case expr
         when LiteralExpr
-          expr.value
+          val = expr.value
+          if val.is_a?(Types::DynValue) && val.string? && val.value.include?("${")
+            return interpolate_string(val.value, context)
+          end
+          val
         when CopyExpr
           val = resolve_path(expr.source_path, context)
           # Apply CopyExpr-level extraction directives only for compatible source formats
@@ -1682,6 +1686,35 @@ module Odin
         return val.to_s unless val.is_a?(Types::DynValue)
 
         FormatExporters.send(:dynvalue_to_string, val)
+      end
+
+      MAX_INTERPOLATIONS = 320
+
+      # Interpolate ${...} expressions within a string template.
+      # Supports ${@path}, ${%verb args}, and \${...} (literal ${...}).
+      def interpolate_string(template, context)
+        count = 0
+        result = template.gsub(/\\?\$\{([^}]+)\}/) do
+          match = Regexp.last_match(0)
+          expr = Regexp.last_match(1)
+          count += 1
+          next match if count > MAX_INTERPOLATIONS
+
+          # Escaped \${ — emit a literal ${...}.
+          next "${#{expr}}" if match.start_with?("\\")
+
+          trimmed = expr.strip
+          if trimmed.start_with?("%")
+            parsed, = TransformParser.new.send(:parse_expr_from_tokens,
+                                               TransformParser.new.send(:tokenize_expression, trimmed))
+            parsed ? dynvalue_string(evaluate(parsed, context)) : match
+          elsif trimmed.start_with?("@")
+            dynvalue_string(resolve_path(trimmed[1..], context))
+          else
+            match
+          end
+        end
+        Types::DynValue.of_string(result)
       end
 
       # ── Object Expression Evaluation ──

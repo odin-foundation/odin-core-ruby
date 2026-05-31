@@ -1337,4 +1337,80 @@ RSpec.describe Odin::Transform::TransformEngine do
       expect(result.errors.first.message).to eq("'else' segment has no preceding 'if'")
     end
   end
+
+  # ── Prefix Coercion on References ──
+
+  describe "prefix coercion on references" do
+    def coercion_transform(mappings)
+      header = "{$}\n" \
+               "odin = \"1.0.0\"\n" \
+               "transform = \"1.0.0\"\n" \
+               "direction = \"json->odin\"\n\n" \
+               "{$source}\nformat = \"json\"\n\n" \
+               "{$target}\nformat = \"odin\"\n\n" \
+               "{vehicle}\n"
+      header + mappings
+    end
+
+    it "coerces a string reference to an integer with ##" do
+      text = coercion_transform("year = ##@.year\n")
+      result = execute_transform(text, { "year" => "2021" })
+      expect(result.output["vehicle"]["year"]).to eq(2021)
+      expect(result.formatted).to include("year = ##2021")
+    end
+
+    it 'coerces a string reference to currency with #$' do
+      text = coercion_transform('premium = #$@.premium' + "\n")
+      result = execute_transform(text, { "premium" => "1499.50" })
+      expect(result.formatted).to include('premium = #$1499.50')
+    end
+
+    it "coerces a string reference to a number with #" do
+      text = coercion_transform("rate = #@.rate\n")
+      result = execute_transform(text, { "rate" => "3.5" })
+      expect(result.output["vehicle"]["rate"]).to be_within(0.001).of(3.5)
+    end
+
+    it 'coerces a string reference to a percent with #%' do
+      text = coercion_transform('pct = #%@.pct' + "\n")
+      result = execute_transform(text, { "pct" => "42" })
+      expect(result.formatted).to include('pct = #%42')
+    end
+  end
+
+  # ── String Interpolation ──
+
+  describe "string interpolation" do
+    def interp_transform(mappings)
+      "{$}\n" \
+        "odin = \"1.0.0\"\n" \
+        "transform = \"1.0.0\"\n" \
+        "direction = \"json->json\"\n\n" \
+        "{Receipt}\n" + mappings
+    end
+
+    it "interpolates a source path reference" do
+      text = interp_transform("name = \"${@.name}\"\n")
+      result = execute_transform(text, { "name" => "Alice" })
+      expect(result.output["Receipt"]["name"]).to eq("Alice")
+    end
+
+    it "interpolates a value within surrounding text" do
+      text = interp_transform("greeting = \"Hello, ${@.name}!\"\n")
+      result = execute_transform(text, { "name" => "Bob" })
+      expect(result.output["Receipt"]["greeting"]).to eq("Hello, Bob!")
+    end
+
+    it "treats \\$ as a literal dollar sign" do
+      text = interp_transform("price = \"Total: \\$${@.amount}\"\n")
+      result = execute_transform(text, { "amount" => "42.00" })
+      expect(result.output["Receipt"]["price"]).to eq("Total: $42.00")
+    end
+
+    it "preserves a literal ${...} when escaped with \\${" do
+      text = interp_transform("template = \"Use \\${@.field} for the value\"\n")
+      result = execute_transform(text, { "field" => "X" })
+      expect(result.output["Receipt"]["template"]).to eq("Use ${@.field} for the value")
+    end
+  end
 end
