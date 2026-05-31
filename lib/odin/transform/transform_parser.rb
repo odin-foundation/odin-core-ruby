@@ -156,6 +156,7 @@ module Odin
         accumulator_sections = {} # section_name -> [assignments]
         table_sections = {} # table_name -> { columns: [...], rows: [...] }
         source_section_fields = {} # {$source} section fields
+        target_section_fields = {} # {$target} section fields
         target_namespaces = {} # {$target.namespace} prefix -> URI (insertion order)
 
         lines.each do |line|
@@ -179,6 +180,9 @@ module Odin
             elsif section_name == "$source"
               current_section = section_name
               current_section_type = :source
+            elsif section_name == "$target"
+              current_section = section_name
+              current_section_type = :target
             elsif section_name == "$target.namespace"
               current_section = section_name
               current_section_type = :target_namespace
@@ -213,6 +217,14 @@ module Odin
             next
           end
 
+          # Bare segment-directive line (e.g. ":loop items", ":counter n", ":from path").
+          # Parsed like "_<name> = \"rest\"", reusing the existing directive handling.
+          if current_section_type == :segment && current_section &&
+             (bare = parse_bare_directive(stripped))
+            sections[current_section][:assignments] << bare
+            next
+          end
+
           # Assignment: key = value
           if stripped =~ /\A([^=]+?)\s*=\s*(.*)\z/
             key = $1.strip
@@ -225,6 +237,8 @@ module Odin
               header_fields[key] = raw_value
             when :source
               source_section_fields[key] = raw_value
+            when :target
+              target_section_fields[key] = raw_value
             when :target_namespace
               target_namespaces[key] = unquote(raw_value) || raw_value
             when :const
@@ -240,8 +254,8 @@ module Odin
           end
         end
 
-        # Parse header (merge source section into source_options)
-        header = parse_header(header_fields, source_section_fields, target_namespaces)
+        # Parse header (merge source/target sections into options)
+        header = parse_header(header_fields, source_section_fields, target_namespaces, target_section_fields)
 
         # Parse constants from header fields and {$const} sections
         constants = parse_constants(header_fields, sections)
@@ -306,6 +320,23 @@ module Odin
         )
       end
 
+      # Segment directives that may be written as a bare ":name args" body line.
+      BARE_DIRECTIVES = %w[loop counter from if elif else literal].freeze
+
+      # Convert ":name rest-of-line" into a synthetic "_name = \"rest\"" assignment.
+      # Returns nil when the line is not a bare directive.
+      def parse_bare_directive(stripped)
+        return nil unless stripped.start_with?(":")
+        return nil unless stripped =~ /\A:(\w+)(?:\s+(.*))?\z/
+
+        name = $1
+        return nil unless BARE_DIRECTIVES.include?(name)
+
+        value = ($2 || "").strip
+        value = "true" if value.empty?
+        { key: "_#{name}", value: value }
+      end
+
       def parse_table_csv_line(line)
         # Remove trailing comment
         line = strip_comment(line)
@@ -358,7 +389,7 @@ module Odin
 
       # ── Header Parsing ──
 
-      def parse_header(fields, source_section_fields = {}, target_namespaces = {})
+      def parse_header(fields, source_section_fields = {}, target_namespaces = {}, target_section_fields = {})
         direction = unquote(fields["direction"])
         target_format = unquote(fields["target.format"])
         odin_version = unquote(fields["odin"]) || "1.0.0"
@@ -385,9 +416,19 @@ module Odin
           end
         end
 
+        # Root-level emitTypeHints is an alias for target.emitTypeHints.
+        if fields.key?("emitTypeHints") && !target_options.key?("emitTypeHints")
+          target_options["emitTypeHints"] = unquote(fields["emitTypeHints"])
+        end
+
         # Merge {$source} section fields into source_options
         source_section_fields.each do |key, val|
           source_options[key] = unquote(val) || val
+        end
+
+        # Merge {$target} section fields into target_options
+        target_section_fields.each do |key, val|
+          target_options[key] = unquote(val) || val
         end
 
         target_format ||= Direction.target_format(direction) if direction
@@ -521,6 +562,23 @@ module Odin
         inline_if_condition = nil
         inline_elif_condition = nil
         inline_is_else = false
+        inline_loop = nil
+        inline_counter = nil
+        inline_from = nil
+
+        # Capture header-inline ":loop"/":counter"/":from"; each value runs to the
+        # next inline directive or the end of the header.
+        terminator = '(?=\s+:loop\s|\s+:counter\s|\s+:from\s|\z)'
+        if name =~ /\A(.+?)\s+:loop\s+(.+?)#{terminator}/
+          inline_loop = $2.strip
+        end
+        if name =~ /\A(.+?)\s+:counter\s+(.+?)#{terminator}/
+          inline_counter = $2.strip
+        end
+        if name =~ /\A(.+?)\s+:from\s+(.+?)#{terminator}/
+          inline_from = $2.strip
+        end
+        name = $1 if name =~ /\A(.+?)\s+:(?:loop|counter|from)\s/
 
         # Strip inline header directive: ":type "value"" keeps the quoted value;
         # ":if"/":elif" capture the unquoted expression; ":else" is a bare flag.
@@ -557,12 +615,13 @@ module Odin
         discriminator = nil
         discriminator_value = inline_discriminator_value
         when_condition = nil
-        each_source = nil
+        each_source = inline_loop || inline_from
+        is_array = true if each_source
         if_condition = inline_if_condition
         elif_condition = inline_elif_condition
         is_else = inline_is_else
         pass = nil
-        counter_name = nil
+        counter_name = inline_counter
 
         assignments.each do |a|
           key = a[:key]
@@ -619,7 +678,13 @@ module Odin
       # ── Field Mapping ──
 
       def parse_field_mapping(target_field, raw_value)
+        # Pull out multi-token trailing directives the expression tokenizer can't carry:
+        #   :if/:unless  -> rest-of-line comparison expression
+        #   :object      -> brace-delimited inline-object spec
+        raw_value, captured = extract_capturing_directives(raw_value)
+
         expr, directives = parse_expression_with_directives(raw_value)
+        directives = captured + directives
 
         modifiers = []
         remaining_directives = []
@@ -643,6 +708,75 @@ module Odin
           modifiers: modifiers,
           directives: remaining_directives
         )
+      end
+
+      # Strip trailing ":if"/":unless"/":object" directives whose values span multiple
+      # expression tokens, returning the remaining value text and the captured directives.
+      def extract_capturing_directives(raw_value)
+        return [raw_value, []] if raw_value.nil?
+
+        # Determine the directive-bearing body: unwrap a fully-quoted RHS so the
+        # capturing scan sees the raw ":if"/":object" tokens.
+        prefix = +""
+        suffix = +""
+        body = raw_value
+        stripped = raw_value.strip
+        if stripped.start_with?('"') && stripped.end_with?('"') && stripped.length >= 2
+          inner = unescape_string(stripped[1...-1])
+          if find_directive(inner, "if") || find_directive(inner, "unless") || find_directive(inner, "object")
+            body = inner
+            if inner.start_with?("@") || inner.start_with?("%")
+              prefix = '"'
+              suffix = '"'
+            end
+          end
+        elsif !(find_directive(body, "if") || find_directive(body, "unless") || find_directive(body, "object"))
+          return [raw_value, []]
+        end
+
+        captured = []
+
+        # :object {…} — capture the brace-delimited spec.
+        if (idx = find_directive(body, "object"))
+          brace = body.index("{", idx)
+          if brace
+            close = matching_brace(body, brace)
+            if close
+              captured << OdinDirective.new("object", body[brace..close])
+              body = body[0...idx].rstrip
+            end
+          end
+        end
+
+        # :if / :unless — capture the rest of the line as the condition expression.
+        %w[if unless].each do |kw|
+          next unless (idx = find_directive(body, kw))
+
+          cond = body[(idx + kw.length + 1)..].to_s.strip
+          captured << OdinDirective.new(kw, cond)
+          body = body[0...idx].rstrip
+        end
+
+        ["#{prefix}#{body}#{suffix}", captured]
+      end
+
+      # Index of a " :name" directive token in str, or nil.
+      def find_directive(str, name)
+        m = str.match(/(?:\A|\s):#{Regexp.escape(name)}(?=\s|\z|\{)/)
+        m ? m.begin(0) + (m[0].start_with?(":") ? 0 : 1) : nil
+      end
+
+      # Index of the brace matching the "{" at open, or nil.
+      def matching_brace(str, open)
+        depth = 0
+        i = open
+        while i < str.length
+          depth += 1 if str[i] == "{"
+          depth -= 1 if str[i] == "}"
+          return i if depth.zero?
+          i += 1
+        end
+        nil
       end
 
       # Recursively collect extraction directives from expression tree into the field mapping

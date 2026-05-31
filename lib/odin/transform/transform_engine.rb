@@ -434,6 +434,8 @@ module Odin
         context = VerbContext.new
         context.source = source
         context.source_format = transform_def.source_format || ""
+        ov = transform_def.header.target_options["onValidation"]
+        context.on_validation = ov if ov && !ov.empty?
 
         # Initialize constants
         transform_def.constants.each do |key, val|
@@ -499,6 +501,16 @@ module Odin
         end
       end
 
+      # A segment whose name begins with "_" is a computation-only sink:
+      # it runs for side effects (accumulators, verbs) and is never emitted.
+      def sink_segment?(segment)
+        name = segment.name.to_s
+        return false if name.empty?
+
+        last = name.split(".").last || name
+        last.start_with?("_")
+      end
+
       def process_segment(segment, source, context, output, modifier_prefix: "")
         # Check _when condition
         if segment.when_condition
@@ -539,6 +551,9 @@ module Odin
         segment.children.each do |child|
           process_segment(child, source, context, segment_result, modifier_prefix: full_prefix)
         end
+
+        # Sink section: side effects only, nothing emitted.
+        return if sink_segment?(segment)
 
         # Merge segment result into output
         if segment_result.any?
@@ -635,8 +650,10 @@ module Odin
           end
         end
 
+        return if sink_segment?(segment)
+
         seg_name = segment.name
-        # Always set the array in output, even if empty (Java parity)
+        # Always set the array in output, even if empty
         set_output_path(output, seg_name, results)
       end
 
@@ -656,35 +673,64 @@ module Odin
         return if target.start_with?("_")
 
         begin
-          # Evaluate expression
-          # Extraction directives (pos, len, field, trim) only apply for extraction-compatible
-          # source formats. For output formats like fixed-width, these directives are used by
-          # the formatter for positioning, NOT for input extraction.
-          src_fmt = context.source_format
-          extraction_compatible = %w[fixed-width csv delimited flat].include?(src_fmt)
-          has_extraction = extraction_compatible &&
-            mapping.directives.any? { |d| %w[pos len field trim].include?(d.name) }
+          # Field-level :if / :unless gate the assignment on a comparison expression.
+          if_dir = mapping.directives.find { |d| d.name == "if" }
+          if if_dir
+            return unless evaluate_condition(if_dir.value.to_s, source, context)
+          end
+          unless_dir = mapping.directives.find { |d| d.name == "unless" }
+          if unless_dir
+            return if evaluate_condition(unless_dir.value.to_s, source, context)
+          end
 
-          # Check if CopyExpr already has its own extraction directives
-          # (applied during evaluate() for compatible source formats)
-          expr_has_own_extraction = extraction_compatible && expr_has_extraction_directives?(mapping.expression)
-
-          if has_extraction && mapping.expression.is_a?(VerbExpr) && !expr_has_own_extraction
-            # For verb expressions with extraction directives, apply extraction
-            # to the first CopyExpr argument before calling the verb (matching Java behavior)
-            val = evaluate_verb_with_extraction(mapping.expression, context, mapping.directives)
+          # :object builds a nested object from an inline {key = @path, …} spec.
+          object_dir = mapping.directives.find { |d| d.name == "object" }
+          if object_dir
+            val = build_inline_object(object_dir.value.to_s, context)
           else
-            val = evaluate(mapping.expression, context)
-            # Apply extraction directives only if expression doesn't handle its own extraction
-            if has_extraction && !expr_has_own_extraction
-              val = apply_extraction_directives(val, mapping.directives)
+            # Evaluate expression
+            # Extraction directives (pos, len, field, trim) only apply for extraction-compatible
+            # source formats. For output formats like fixed-width, these directives are used by
+            # the formatter for positioning, NOT for input extraction.
+            src_fmt = context.source_format
+            extraction_compatible = %w[fixed-width csv delimited flat].include?(src_fmt)
+            has_extraction = extraction_compatible &&
+              mapping.directives.any? { |d| %w[pos len field trim].include?(d.name) }
+
+            # Check if CopyExpr already has its own extraction directives
+            # (applied during evaluate() for compatible source formats)
+            expr_has_own_extraction = extraction_compatible && expr_has_extraction_directives?(mapping.expression)
+
+            if has_extraction && mapping.expression.is_a?(VerbExpr) && !expr_has_own_extraction
+              # For verb expressions with extraction directives, apply extraction
+              # to the first CopyExpr argument before calling the verb
+              val = evaluate_verb_with_extraction(mapping.expression, context, mapping.directives)
+            else
+              val = evaluate(mapping.expression, context)
+              # Apply extraction directives only if expression doesn't handle its own extraction
+              if has_extraction && !expr_has_own_extraction
+                val = apply_extraction_directives(val, mapping.directives)
+              end
+            end
+
+            # Apply remaining directives (non-extraction: type, default, upper, lower, etc.)
+            mapping.directives.each do |directive|
+              next if %w[pos len field trim if unless object raw array cdata validate enum range].include?(directive.name)
+              val = apply_directive(val, directive, source, context)
             end
           end
 
-          # Apply remaining directives (non-extraction: type, default, upper, lower, etc.)
-          mapping.directives.each do |directive|
-            next if %w[pos len field trim].include?(directive.name)
-            val = apply_directive(val, directive, source, context)
+          # Validation modifiers: :validate / :enum / :range (honors onValidation policy).
+          return unless validate_field_value(val, mapping, context)
+
+          # :raw emits inline JSON structurally instead of an escaped string.
+          if mapping.directives.any? { |d| d.name == "raw" }
+            val = parse_raw_json_value(val)
+          end
+
+          # :array wraps the value in a single-element array.
+          if mapping.directives.any? { |d| d.name == "array" }
+            val = Types::DynValue.of_array([val.is_a?(Types::DynValue) ? val : Types::DynValue.from_ruby(val)])
           end
 
           # Track field modifiers with full path
@@ -776,7 +822,11 @@ module Odin
 
         if path.start_with?("$accumulator.") || path.start_with?("$accumulators.")
           key = path.sub(/\A\$(?:accumulator|accumulators)\./, "")
-          return context.get_accumulator(key)
+          acc = context.get_accumulator(key)
+          return acc unless acc.null?
+          # Loop counters declared via :counter are also readable through the accumulator reference.
+          return context.loop_vars[key] if context.loop_vars.key?(key)
+          return acc
         end
 
         # _index, _length loop vars
@@ -1139,8 +1189,9 @@ module Odin
         elsif str.match?(/\A-?\d+\.\d+\z/)
           Types::DynValue.of_float(str.to_f)
         else
-          # Treat as path without @
-          resolve_dotted_path(source.is_a?(Types::DynValue) ? source : context.source, str)
+          # Treat as path without @; an unresolved bare word is a string literal.
+          resolved = resolve_dotted_path(source.is_a?(Types::DynValue) ? source : context.source, str)
+          resolved.is_a?(Types::DynValue) && resolved.null? ? Types::DynValue.of_string(str) : resolved
         end
       end
 
@@ -1483,6 +1534,132 @@ module Odin
         end
       end
 
+      # ── Inline Object / Raw JSON / Validation ──
+
+      # Build a structural object from an inline ":object {key = @path, …}" spec.
+      def build_inline_object(spec, context)
+        trimmed = spec.strip.sub(/\A\{/, "").sub(/\}\z/, "")
+        entries = {}
+        unless trimmed.strip.empty?
+          split_object_pairs(trimmed).each do |pair|
+            eq = pair.index("=")
+            next unless eq
+
+            key = pair[0...eq].strip
+            rhs = pair[(eq + 1)..].strip
+            next if key.empty?
+
+            expr, = TransformParser.new.parse_expression_string(rhs)
+            entries[key] = evaluate(expr, context)
+          end
+        end
+        Types::DynValue.of_object(entries)
+      end
+
+      # Split an inline-object body on commas not nested inside braces.
+      def split_object_pairs(body)
+        pairs = []
+        depth = 0
+        current = +""
+        body.each_char do |ch|
+          depth += 1 if ch == "{"
+          depth -= 1 if ch == "}"
+          if ch == "," && depth.zero?
+            pairs << current
+            current = +""
+          else
+            current << ch
+          end
+        end
+        pairs << current unless current.strip.empty?
+        pairs
+      end
+
+      # Parse a string value as JSON for :raw, producing a structural DynValue.
+      def parse_raw_json_value(val)
+        return val unless val.is_a?(Types::DynValue) && val.string?
+
+        begin
+          Types::DynValue.from_ruby(JSON.parse(val.value))
+        rescue StandardError
+          val
+        end
+      end
+
+      # Validate a value against :validate / :enum / :range directives.
+      # Returns false when the field should be dropped (onValidation = skip / fail).
+      def validate_field_value(val, mapping, context)
+        return true if val.is_a?(Types::DynValue) && val.null?
+
+        policy = context.on_validation || "fail"
+        failures = []
+
+        validate_dir = mapping.directives.find { |d| d.name == "validate" }
+        if validate_dir && !validate_dir.value.nil?
+          pattern = validate_dir.value.to_s
+          str = dynvalue_string(val)
+          begin
+            failures << "value '#{str}' does not match pattern '#{pattern}'" unless Regexp.new(pattern).match?(str)
+          rescue RegexpError
+            failures << "invalid validation pattern '#{pattern}'"
+          end
+        end
+
+        enum_dir = mapping.directives.find { |d| d.name == "enum" }
+        if enum_dir && !enum_dir.value.nil?
+          allowed = enum_dir.value.to_s.split(",").map { |v| v.strip.gsub(/\A["']|["']\z/, "") }
+          str = dynvalue_string(val)
+          failures << "value '#{str}' is not one of [#{allowed.join(', ')}]" unless allowed.include?(str)
+        end
+
+        range_dir = mapping.directives.find { |d| d.name == "range" }
+        if range_dir && !range_dir.value.nil?
+          range_str = range_dir.value.to_s
+          parts = range_str.split("..")
+          min = Float(parts[0]) rescue nil
+          max = Float(parts[1]) rescue nil
+          num = numeric_of(val)
+          if num.nil?
+            failures << "value '#{dynvalue_string(val)}' is not numeric for range #{range_str}"
+          elsif (min && num < min) || (max && num > max)
+            failures << "value #{num} is outside range #{range_str}"
+          end
+        end
+
+        return true if failures.empty?
+
+        message = "Validation failed for '#{mapping.target_field}': #{failures.join('; ')}"
+        case policy
+        when "warn"
+          # Warn but still emit.
+          true
+        when "skip"
+          false
+        else
+          context.errors << TransformError.new(message, code: "T013")
+          false
+        end
+      end
+
+      def numeric_of(val)
+        return nil unless val.is_a?(Types::DynValue)
+
+        case val.type
+        when :integer, :float, :float_raw, :currency, :currency_raw, :percent
+          val.to_number.to_f
+        when :string
+          Float(val.value) rescue nil
+        else
+          nil
+        end
+      end
+
+      def dynvalue_string(val)
+        return val.to_s unless val.is_a?(Types::DynValue)
+
+        FormatExporters.send(:dynvalue_to_string, val)
+      end
+
       # ── Object Expression Evaluation ──
 
       def evaluate_object(expr, context)
@@ -1544,10 +1721,11 @@ module Odin
 
       # Format output as fixed-width text (segment-based, matching TypeScript)
       def format_fixed_width_output(output_dv, transform_def)
-        line_width = 80
         lw = transform_def.header.target_options["lineWidth"]
-        line_width = lw.to_i if lw && lw.to_i > 0
+        has_line_width = !lw.nil? && parse_target_int(lw, 0) > 0
+        line_width = has_line_width ? parse_target_int(lw, 80) : 80
         default_pad = transform_def.header.target_options["padChar"] || " "
+        truncate = transform_def.header.target_options["truncate"] == "true"
         line_ending = transform_def.header.target_options["lineEnding"] || "\n"
 
         lines = []
@@ -1560,12 +1738,12 @@ module Odin
             # Array segment: one line per item
             seg_data.each do |item|
               data = item.is_a?(Types::DynValue) ? dynvalue_to_flat_hash(item) : (item.is_a?(Hash) ? item : {})
-              lines << format_fwf_line(segment.field_mappings, data, line_width, default_pad)
+              lines << format_fwf_line(segment.field_mappings, data, line_width, default_pad, has_line_width, truncate)
             end
           elsif segment.is_array && seg_data.is_a?(Types::DynValue) && seg_data.array?
             seg_data.value.each do |item|
               data = dynvalue_to_flat_hash(item)
-              lines << format_fwf_line(segment.field_mappings, data, line_width, default_pad)
+              lines << format_fwf_line(segment.field_mappings, data, line_width, default_pad, has_line_width, truncate)
             end
           else
             # Single segment: one line
@@ -1576,7 +1754,7 @@ module Odin
                    else
                      dynvalue_to_flat_hash(output_dv)
                    end
-            lines << format_fwf_line(segment.field_mappings, data, line_width, default_pad)
+            lines << format_fwf_line(segment.field_mappings, data, line_width, default_pad, has_line_width, truncate)
           end
         end
 
@@ -1615,7 +1793,7 @@ module Odin
         result
       end
 
-      def format_fwf_line(mappings, data, line_width, default_pad)
+      def format_fwf_line(mappings, data, line_width, default_pad, has_line_width = false, truncate = false)
         # Sort mappings by :pos for deterministic output
         sorted = mappings.sort_by do |m|
           pos_dir = m.directives.find { |d| d.name == "pos" }
@@ -1678,6 +1856,15 @@ module Odin
           end
         end
 
+        # Pad the record to the configured fixed line width.
+        if has_line_width
+          if line.length < line_width
+            line += default_pad * (line_width - line.length)
+          elsif line.length > line_width && truncate
+            line = line[0...line_width]
+          end
+        end
+
         line
       end
 
@@ -1698,13 +1885,15 @@ module Odin
         xml = +""
         xml << %{<?xml version="1.0" encoding="UTF-8"?>\n} if include_declaration
 
-        # Collect per-field :attr and :ns directives per segment
+        # Collect per-field :attr, :ns and :cdata directives per segment
         attr_fields = {}
         ns_fields = {}
+        cdata_fields = {}
         transform_def.segments.each do |segment|
           segment.field_mappings.each do |mapping|
             full = "#{segment.name}.#{mapping.target_field}"
             attr_fields[full] = true if mapping.directives.any? { |d| d.name == "attr" }
+            cdata_fields[full] = true if mapping.directives.any? { |d| d.name == "cdata" }
             ns_dir = mapping.directives.find { |d| d.name == "ns" }
             ns_fields[full] = ns_dir.value if ns_dir
           end
@@ -1723,7 +1912,7 @@ module Odin
                       []
                     end
             items.each do |item|
-              xml << render_xml_segment_element(seg_name, item, segment, attr_fields, ns_fields,
+              xml << render_xml_segment_element(seg_name, item, segment, attr_fields, ns_fields, cdata_fields,
                                                 is_array: true, indent_str: indent_str,
                                                 emit_type_hints: emit_type_hints, namespaces: namespaces)
             end
@@ -1735,7 +1924,7 @@ module Odin
                    else
                      output_dv
                    end
-            xml << render_xml_segment_element(seg_name, data, segment, attr_fields, ns_fields,
+            xml << render_xml_segment_element(seg_name, data, segment, attr_fields, ns_fields, cdata_fields,
                                               is_array: false, indent_str: indent_str,
                                               emit_type_hints: emit_type_hints, namespaces: namespaces)
           end
@@ -1744,7 +1933,7 @@ module Odin
         xml
       end
 
-      def render_xml_segment_element(seg_name, data, segment, attr_fields, ns_fields, is_array: false, indent_str: "  ", emit_type_hints: true, namespaces: {})
+      def render_xml_segment_element(seg_name, data, segment, attr_fields, ns_fields, cdata_fields = {}, is_array: false, indent_str: "  ", emit_type_hints: true, namespaces: {})
         return "" unless data.is_a?(Types::DynValue) && data.object?
 
         entries = data.value
@@ -1780,7 +1969,12 @@ module Odin
           next unless val
           tag = ns_qualify_xml(key, ns_fields["#{seg_name}.#{key}"])
           type_attr = emit_type_hints ? xml_type_attr(val) : ""
-          xml << "#{indent_str}<#{tag}#{type_attr}>#{xml_escape_attr(val_to_xml_string(val))}</#{tag}>\n"
+          text = if cdata_fields["#{seg_name}.#{key}"]
+                   "<![CDATA[#{val_to_xml_string(val)}]]>"
+                 else
+                   xml_escape_attr(val_to_xml_string(val))
+                 end
+          xml << "#{indent_str}<#{tag}#{type_attr}>#{text}</#{tag}>\n"
         end
         xml << "</#{seg_name}>\n"
         xml
