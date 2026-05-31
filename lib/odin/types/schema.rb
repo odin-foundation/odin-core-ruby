@@ -111,12 +111,13 @@ module Odin
     class SchemaField
       attr_reader :name, :field_type, :required, :nullable, :redacted, :deprecated,
                   :constraints, :conditionals, :default_value, :description,
-                  :computed, :immutable, :type_ref
+                  :computed, :immutable, :type_ref, :union_members
 
       def initialize(name:, field_type:, required: false, nullable: false,
                      redacted: false, deprecated: false, constraints: [],
                      conditionals: [], default_value: nil, description: nil,
-                     computed: false, immutable: false, type_ref: nil)
+                     computed: false, immutable: false, type_ref: nil,
+                     union_members: nil)
         @name = name.freeze
         @field_type = field_type
         @required = required
@@ -130,7 +131,13 @@ module Odin
         @computed = computed
         @immutable = immutable
         @type_ref = type_ref&.freeze
+        @union_members = union_members&.freeze
         freeze
+      end
+
+      # Type members for a union field (e.g. [:number, :null]); nil when not a union.
+      def union?
+        !@union_members.nil?
       end
     end
 

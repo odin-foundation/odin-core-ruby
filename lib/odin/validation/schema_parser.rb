@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "bigdecimal"
+
 module Odin
   module Validation
     class SchemaParser
@@ -422,6 +424,10 @@ module Odin
             # Type-level constraint: = :(10..15) :pattern "..." or = @TypeA & @TypeB
             parse_type_constraint_line(right)
             return
+          elsif right.start_with?("@")
+            # Type composition under an object/type header: = @TypeA & @TypeB
+            parse_composition_line(right)
+            return
           elsif right.start_with?(":")
             if @current_array_path && @arrays[@current_array_path]
               unique, min_items, max_items = parse_array_constraint_text(right)
@@ -521,6 +527,43 @@ module Odin
         end
       end
 
+      # Type composition under an object/type header: = @TypeA & @TypeB [:override]
+      # Stored as a _composition field whose type_ref carries the &-joined members.
+      def parse_composition_line(spec)
+        override = false
+        if spec.include?(":override")
+          override = true
+          spec = spec.sub(/:override/, "").strip
+        end
+
+        refs = spec.split("&").map { |p| p.strip.sub(/^@/, "") }.reject(&:empty?)
+        return if refs.empty?
+
+        ref_name = "@#{refs.join('&')}"
+        comp = Types::SchemaField.new(
+          name: "_composition", field_type: Types::SchemaFieldType::REFERENCE,
+          type_ref: ref_name, computed: false, immutable: override
+        )
+
+        case @current_header_kind
+        when :type
+          if @current_type_name && @types[@current_type_name]
+            old = @types[@current_type_name]
+            new_fields = old.fields.dup
+            new_fields["_composition"] = comp
+            @types[@current_type_name] = Types::SchemaType.new(
+              name: old.name, fields: new_fields, namespace: old.namespace,
+              composition: old.composition, base_type: old.base_type,
+              constraints: old.constraints, intersection_types: old.intersection_types,
+              parent_types: old.parent_types
+            )
+          end
+        when :object
+          path = @current_header ? "#{@current_header}._composition" : "_composition"
+          @fields[path] = comp
+        end
+      end
+
       def parse_field_spec(path, spec)
         field_type = Types::SchemaFieldType::STRING
         required = false
@@ -554,12 +597,20 @@ module Odin
 
         remaining = spec[pos..].to_s.strip
 
-        # Parse type
-        type_result = parse_type_spec(remaining)
-        field_type = type_result[0]
-        remaining = type_result[1]
-        enum_values = type_result[2] # may be nil
-        type_ref = type_result[3] # may be nil
+        union_members = nil
+
+        # Parse type (union if the type segment contains a top-level |)
+        if union_type_segment?(remaining)
+          union_members, field_type, remaining = parse_union_type(remaining)
+          enum_values = nil
+          type_ref = nil
+        else
+          type_result = parse_type_spec(remaining)
+          field_type = type_result[0]
+          remaining = type_result[1]
+          enum_values = type_result[2] # may be nil
+          type_ref = type_result[3] # may be nil
+        end
 
         # If enum values were returned, add as constraint
         if enum_values
@@ -586,12 +637,110 @@ module Odin
           end
         end
 
+        # A typed default may trail the type/constraints (e.g. "##3", "#$5.00", "(1..5) ##3")
+        default_value = parse_default_value(field_type, remaining)
+
         Types::SchemaField.new(
           name: path, field_type: field_type, required: required,
           nullable: nullable, redacted: redacted, deprecated: deprecated,
           constraints: constraints, conditionals: conditionals,
-          computed: computed, immutable: immutable, type_ref: type_ref
+          computed: computed, immutable: immutable, type_ref: type_ref,
+          default_value: default_value, union_members: union_members
         )
+      end
+
+      # True when the type segment of a spec contains a top-level union pipe.
+      def union_type_segment?(text)
+        head = text.to_s.strip.split(/\s|:/, 2).first.to_s
+        head.include?("|")
+      end
+
+      # Parse a union type segment like "date|timestamp" or "#|~".
+      # Returns [member_symbols, primary_type, remaining].
+      def parse_union_type(text)
+        text = text.to_s.strip
+        seg = text.split(/\s|:/, 2)
+        head = seg[0]
+        remaining = text[head.length..].to_s.strip
+        members = head.split("|").map { |m| union_member_type(m.strip) }.compact
+        primary = members.first || Types::SchemaFieldType::STRING
+        [members, primary, remaining]
+      end
+
+      # Map a single union member token to its SchemaFieldType.
+      def union_member_type(tok)
+        return nil if tok.empty?
+
+        case tok
+        when "##" then Types::SchemaFieldType::INTEGER
+        when "#" + "$" then Types::SchemaFieldType::CURRENCY
+        when "#" + "%" then Types::SchemaFieldType::PERCENT
+        when "#" then Types::SchemaFieldType::NUMBER
+        when "?" then Types::SchemaFieldType::BOOLEAN
+        when "~" then Types::SchemaFieldType::NULL
+        when "^" then Types::SchemaFieldType::BINARY
+        when '""', "''" then Types::SchemaFieldType::STRING
+        when "date" then Types::SchemaFieldType::DATE
+        when "timestamp", "datetime" then Types::SchemaFieldType::TIMESTAMP
+        when "time" then Types::SchemaFieldType::TIME
+        when "duration" then Types::SchemaFieldType::DURATION
+        when "string" then Types::SchemaFieldType::STRING
+        when "integer" then Types::SchemaFieldType::INTEGER
+        when "number" then Types::SchemaFieldType::NUMBER
+        when "boolean" then Types::SchemaFieldType::BOOLEAN
+        when "currency" then Types::SchemaFieldType::CURRENCY
+        when "percent" then Types::SchemaFieldType::PERCENT
+        else Types::SchemaFieldType::STRING
+        end
+      end
+
+      # Parse a trailing typed default value (e.g. "##3", "#0.05", "#$5.00", "#%0.15").
+      # Returns an OdinValue or nil.
+      def parse_default_value(field_type, text)
+        s = text.to_s.strip
+        return nil if s.empty?
+        return nil if s.start_with?(":")
+
+        if s.start_with?("##")
+          Types::OdinInteger.new(Integer(s[2..].strip, exception: false) || 0)
+        elsif s.start_with?("#" + "$")
+          to_currency(s[2..].strip)
+        elsif s.start_with?("#" + "%")
+          Types::OdinPercent.new(to_float(s[2..].strip))
+        elsif s.start_with?("#")
+          Types::OdinNumber.new(to_float(s[1..].strip))
+        elsif s.start_with?("?")
+          Types::OdinBoolean.new(s[1..].strip == "true")
+        elsif s == "true" || s == "false"
+          Types::OdinBoolean.new(s == "true")
+        elsif s.match?(/\A-?\d+\z/)
+          default_numeric_for(field_type, s)
+        elsif s.match?(/\A-?\d+\.\d+\z/)
+          default_numeric_for(field_type, s)
+        elsif s.start_with?('"', "'")
+          Types::OdinString.new(s.gsub(/\A["']|["']\z/, ""))
+        end
+      end
+
+      def default_numeric_for(field_type, s)
+        case field_type
+        when Types::SchemaFieldType::INTEGER then Types::OdinInteger.new(s.to_i)
+        when Types::SchemaFieldType::CURRENCY then to_currency(s)
+        when Types::SchemaFieldType::PERCENT then Types::OdinPercent.new(s.to_f)
+        else Types::OdinNumber.new(s.to_f)
+        end
+      end
+
+      def to_float(s)
+        Float(s)
+      rescue ArgumentError, TypeError
+        0.0
+      end
+
+      def to_currency(s)
+        Types::OdinCurrency.new(BigDecimal(s))
+      rescue ArgumentError, TypeError
+        nil
       end
 
       # Returns [type, remaining, enum_values_or_nil, type_ref_or_nil]

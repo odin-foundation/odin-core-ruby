@@ -117,32 +117,86 @@ module Odin
                 )
               end
             end
-          else
-            # Check required fields at each usage path
-            type_usage_paths.each do |usage_path|
-              schema_type.fields.each do |field_name, field|
-                next unless field.required
-                next if field.computed
-                next if has_active_conditional?(field)
-
-                full_path = "#{usage_path}.#{field_name}"
-                unless doc_has_value?(full_path)
-                  add_error(
-                    code: Errors::ValidationErrorCode::REQUIRED_FIELD_MISSING,
-                    path: full_path,
-                    message: "Required field '#{full_path}' is missing",
-                    expected: "present"
-                  )
-                end
-              end
-            end
           end
+          # Field-level typeRef usage (e.g. billing = @address) is enforced by
+          # check_field_typeref_required_fields with presence gating.
         end
 
         # Check array item fields
         @schema.arrays.each do |array_path, schema_array|
           check_array_item_required_fields(array_path, schema_array)
         end
+
+        # Object compositions (= @A & @B) and field-level typeRefs (billing = @address)
+        check_composition_required_fields
+        check_field_typeref_required_fields
+      end
+
+      # Object composition: a _composition field under a path enforces the union of
+      # the referenced types' required fields at that path.
+      def check_composition_required_fields
+        @schema.fields.each do |path, field|
+          next unless path.end_with?("._composition")
+          next unless field.type_ref
+
+          parent = path[0...-("._composition".length)]
+          member_names(field.type_ref).each do |member|
+            type = lookup_type(member)
+            next unless type # unresolved members reported by V013
+
+            type.fields.each do |fname, tfield|
+              next if fname == "_composition"
+              next unless tfield.required
+
+              full = "#{parent}.#{fname}"
+              next if doc_has_value?(full)
+
+              add_error(
+                code: Errors::ValidationErrorCode::REQUIRED_FIELD_MISSING,
+                path: full,
+                message: "Required field '#{full}' is missing",
+                expected: "present"
+              )
+            end
+          end
+        end
+      end
+
+      # A field typed @SomeType enforces that type's required fields under the field
+      # path, but only when the sub-object is present (or the field itself required).
+      def check_field_typeref_required_fields
+        @schema.fields.each do |path, field|
+          next if path.end_with?("._composition")
+          next unless field.type_ref
+
+          member_names(field.type_ref).each do |member|
+            type = lookup_type(member)
+            next unless type
+
+            present = doc_section_exists?(path)
+            next if !present && !field.required
+
+            type.fields.each do |fname, tfield|
+              next if fname == "_composition"
+              next unless tfield.required
+
+              full = "#{path}.#{fname}"
+              next if doc_has_value?(full)
+
+              add_error(
+                code: Errors::ValidationErrorCode::REQUIRED_FIELD_MISSING,
+                path: full,
+                message: "Required field '#{full}' is missing",
+                expected: "present"
+              )
+            end
+          end
+        end
+      end
+
+      # Split an &-joined type_ref (e.g. "@hasName&hasAge") into bare member names.
+      def member_names(type_ref)
+        type_ref.sub(/\A@+/, "").split("&").map(&:strip).reject(&:empty?)
       end
 
       def check_array_item_required_fields(array_path, schema_array)
@@ -174,11 +228,28 @@ module Odin
 
       def check_type_matches
         each_schema_field do |path, field, value|
-          next if value.nil? || value.null?
+          next if value.nil?
+
+          actual_type = value_to_schema_type(value)
+
+          # Union field: value matches if compatible with any member.
+          if field.union?
+            next if field.union_members.any? { |m| types_compatible?(m, actual_type, value) }
+
+            add_error(
+              code: Errors::ValidationErrorCode::TYPE_MISMATCH,
+              path: path,
+              message: "Value does not match any union member at '#{path}'",
+              expected: field.union_members.map(&:to_s).join("|"),
+              actual: actual_type.to_s
+            )
+            next
+          end
+
+          next if value.null?
           expected_type = field.field_type
           next if expected_type == Types::SchemaFieldType::ANY
 
-          actual_type = value_to_schema_type(value)
           next if types_compatible?(expected_type, actual_type, value)
 
           add_error(
@@ -505,8 +576,31 @@ module Odin
         end
       end
 
+      # Operand keywords in invariant expressions that are not field references.
+      INVARIANT_KEYWORDS = Set.new(%w[true false]).freeze
+
       def evaluate_invariant(scope, invariant)
-        expr = invariant.expression
+        expr = invariant.expression.strip
+
+        # Spec: any present-but-null operand makes the invariant evaluate to false.
+        if invariant_has_null_operand?(scope, expr)
+          add_error(
+            code: Errors::ValidationErrorCode::INVARIANT_VIOLATION,
+            path: scope,
+            message: "Invariant '#{expr}' violated at '#{scope}'",
+            expected: expr,
+            actual: "null operand"
+          )
+          return
+        end
+
+        # Arithmetic equality: field = a OP b (e.g. "total = subtotal + tax")
+        arith = expr.match(%r{\A(\w+)\s*=\s*(\w+)\s*([+\-*/])\s*(\w+)\z})
+        if arith
+          evaluate_arithmetic_invariant(scope, expr, arith)
+          return
+        end
+
         # Parse simple binary expressions: field OPERATOR value_or_field
         match = expr.match(/\A(\S+)\s*(>=|<=|!=|==|>|<|=)\s*(.+)\z/)
         return unless match
@@ -539,6 +633,57 @@ module Odin
             expected: expr
           )
         end
+      end
+
+      # True when any field operand referenced by the expression is present with a
+      # null value. Absent operands are not treated as null (handled by V001).
+      def invariant_has_null_operand?(scope, expr)
+        expr.scan(/[A-Za-z_][A-Za-z0-9_.]*/).any? do |token|
+          next false if INVARIANT_KEYWORDS.include?(token)
+
+          path = scope.empty? ? token : "#{scope}.#{token}"
+          value = @doc.get(path)
+          !value.nil? && value.null?
+        end
+      end
+
+      # Evaluate "field = a OP b" arithmetic; flag V008 on inconsistency.
+      def evaluate_arithmetic_invariant(scope, expr, match)
+        lhs = resolve_invariant_number(scope, match[1])
+        a = resolve_invariant_number(scope, match[2])
+        b = resolve_invariant_number(scope, match[4])
+        return if lhs.nil? || a.nil? || b.nil? # operands missing, invariant doesn't apply
+
+        rhs = case match[3]
+              when "+" then a + b
+              when "-" then a - b
+              when "*" then a * b
+              when "/" then b.zero? ? Float::NAN : a / b
+              end
+        return if rhs.nil?
+
+        if (lhs - rhs).abs > 0.001
+          add_error(
+            code: Errors::ValidationErrorCode::INVARIANT_VIOLATION,
+            path: scope,
+            message: "Invariant '#{expr}' violated at '#{scope}'",
+            expected: expr,
+            actual: "false"
+          )
+        end
+      end
+
+      # Resolve a field name or numeric literal to a Float for arithmetic invariants.
+      def resolve_invariant_number(scope, token)
+        path = scope.empty? ? token : "#{scope}.#{token}"
+        value = @doc.get(path)
+        if value
+          return extract_numeric_value(value)
+        end
+
+        Float(token)
+      rescue ArgumentError, TypeError
+        nil
       end
 
       def compare_values(left, operator, right)
@@ -856,17 +1001,18 @@ module Odin
       end
 
       def check_type_reference(path, type_ref)
-        # Strip leading @ or @@ from type reference for lookup
-        clean_ref = type_ref.sub(/\A@+/, "")
-        return unless lookup_type(clean_ref).nil?
+        # An intersection type_ref carries multiple &-joined member names.
+        member_names(type_ref).each do |member|
+          next unless lookup_type(member).nil?
 
-        add_error(
-          code: Errors::ValidationErrorCode::UNRESOLVED_REFERENCE,
-          path: path,
-          message: "Type reference '@@#{clean_ref}' at '#{path}' does not resolve to any type",
-          expected: "valid type name",
-          actual: type_ref
-        )
+          add_error(
+            code: Errors::ValidationErrorCode::UNRESOLVED_REFERENCE,
+            path: path,
+            message: "Type reference '@@#{member}' at '#{path}' does not resolve to any type",
+            expected: "valid type name",
+            actual: type_ref
+          )
+        end
       end
 
       # Resolve a type name: registry (namespaced imports) first, then local types.
