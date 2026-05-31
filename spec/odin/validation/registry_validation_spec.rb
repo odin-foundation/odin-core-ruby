@@ -1,12 +1,8 @@
 # frozen_string_literal: true
 
 require_relative "../../spec_helper"
-require "date"
 
 RSpec.describe "Registry-aware schema validation" do
-  CANONICAL_POLICY_SCHEMA =
-    File.expand_path("../../../../../../schemas/insurance/personal/auto/policy.schema.odin", __FILE__)
-
   def unresolved_ref_count(result)
     result.errors.count { |e| e.code == Odin::Errors::ValidationErrorCode::UNRESOLVED_REFERENCE }
   end
@@ -52,33 +48,64 @@ RSpec.describe "Registry-aware schema validation" do
     end
   end
 
-  describe "canonical policy schema with resolved imports" do
-    let(:schema) { Odin.parse_schema(File.read(CANONICAL_POLICY_SCHEMA, encoding: "UTF-8")) }
+  describe "imported typeref resolves via the import resolver" do
+    # Two tiny inline schemas served from memory: a main schema importing a
+    # `types` schema, with a top-level field referencing @types.policy_status.
+    main_schema = <<~ODIN
+      @import "./types.schema.odin" as types
 
-    it "builds a registry namespacing imported types by alias" do
-      _flat, registry = Odin::Resolver::ImportResolver.new
-                                                      .resolve_with_registry(schema, base_path: CANONICAL_POLICY_SCHEMA)
+      {$}
+      odin = "1.0.0"
+
+      status = !@types.policy_status
+    ODIN
+    types_schema = <<~ODIN
+      {$}
+      odin = "1.0.0"
+
+      {@policy_status}
+      value = !
+    ODIN
+
+    # In-memory file reader: keys imports by basename, no disk access.
+    let(:loader) do
+      files = { "types.schema.odin" => types_schema }
+      ->(abs) { files.fetch(File.basename(abs)) }
+    end
+    let(:schema) { Odin.parse_schema(main_schema) }
+    let(:doc) { Odin.parse("status = \"active\"") }
+    let(:registry) do
+      _flat, reg = Odin::Resolver::ImportResolver.new(loader: loader)
+                                                 .resolve_with_registry(schema, base_path: "main.schema.odin")
+      reg
+    end
+
+    it "namespaces the imported type by alias" do
       expect(registry.has?("types.policy_status")).to be true
     end
 
+    it "reports V013 without a registry" do
+      expect(unresolved_ref_count(Odin.validate(doc, schema))).to eq(1)
+    end
+
+    it "resolves the imported type with the resolver-built registry (V013 -> 0)" do
+      expect(unresolved_ref_count(Odin.validate(doc, schema, {}, registry))).to eq(0)
+    end
+  end
+
+  describe "relative-subsection nesting" do
     it "nests term.* into the @policy type, not the schema root" do
+      schema = Odin.parse_schema(<<~ODIN)
+        {@policy}
+        number = !
+
+        {.term}
+        effective = !date
+        expiration = !date
+      ODIN
       expect(schema.types["policy"].fields).to include("term.effective", "term.expiration")
-    end
-
-    it "yields no root required-field errors for an empty document" do
-      result = Odin.validate_with_imports(Odin.parse(""), schema, CANONICAL_POLICY_SCHEMA)
-      required_missing = result.errors.count do |e|
-        e.code == Odin::Errors::ValidationErrorCode::REQUIRED_FIELD_MISSING
-      end
-      expect(required_missing).to eq(0)
-    end
-
-    it "validates a minimal satisfying document clean" do
-      b = Odin.builder
-      b.set(".term.effective", Odin::Types::OdinDate.new(Date.new(2025, 1, 1)))
-      b.set(".term.expiration", Odin::Types::OdinDate.new(Date.new(2025, 12, 31)))
-      result = Odin.validate_with_imports(b.build, schema, CANONICAL_POLICY_SCHEMA)
-      expect(result.valid?).to be true
+      expect(schema.fields).not_to have_key("term.effective")
+      expect(schema.fields).not_to have_key("term.expiration")
     end
   end
 end
