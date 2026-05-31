@@ -34,6 +34,11 @@ module Odin
         @current_header_kind = :root # :root, :metadata, :type, :array, :object
         @current_type_name = nil
         @current_array_path = nil
+
+        # Relative-header context for {.sub} nesting
+        @previous_header_path = ""
+        @previous_header_type = ""
+        @current_type_sub_path = ""
       end
 
       # Parse an ODIN schema document text into an OdinSchema
@@ -79,8 +84,13 @@ module Odin
       private
 
       def parse_import(line)
-        parts = line[8..].strip.split
-        @imports << Types::SchemaImport.new(path: parts[0]) if parts.any?
+        # @import "path" as alias
+        m = line[8..].strip.match(/\A"([^"]*)"(?:\s+as\s+(\S+))?/) ||
+            line[8..].strip.match(/\A'([^']*)'(?:\s+as\s+(\S+))?/) ||
+            line[8..].strip.match(/\A(\S+)(?:\s+as\s+(\S+))?/)
+        return unless m
+
+        @imports << Types::SchemaImport.new(path: m[1], alias_name: m[2])
       end
 
       # Handle bare @TypeName lines (not inside {})
@@ -128,6 +138,15 @@ module Odin
         content = line[1...brace_end].strip
         after_header = line[(brace_end + 1)..].to_s.strip
 
+        # Relative header {.sub}: nest under the last absolute context, not the schema root
+        if content.start_with?(".")
+          parse_relative_header(content[1..])
+          return
+        end
+
+        # Absolute header resets the relative sub-path context
+        @current_type_sub_path = ""
+
         if content == "$" || content == "$derivation"
           @current_header = content
           @current_header_kind = :metadata
@@ -140,6 +159,8 @@ module Odin
           @current_header_kind = :type
           @current_type_name = type_name
           @current_array_path = nil
+          @previous_header_type = type_name
+          @previous_header_path = ""
           @types[type_name] ||= Types::SchemaType.new(name: type_name, fields: {})
         elsif content.end_with?("[]")
           # Array definition
@@ -148,6 +169,8 @@ module Odin
           @current_header_kind = :array
           @current_type_name = nil
           @current_array_path = array_path
+          @previous_header_path = array_path
+          @previous_header_type = ""
 
           min_items = nil
           max_items = nil
@@ -167,6 +190,29 @@ module Odin
         else
           # Regular object header
           @current_header = content
+          @current_header_kind = :object
+          @current_type_name = nil
+          @current_array_path = nil
+          @previous_header_path = content
+          @previous_header_type = ""
+        end
+      end
+
+      # Relative header {.sub}: re-open the last absolute type (prefixing field keys
+      # with the sub-path) or nest under the last absolute object path
+      def parse_relative_header(sub_path)
+        if !@previous_header_type.empty?
+          @current_header_kind = :type
+          @current_type_name = @previous_header_type
+          @current_header = "@#{@previous_header_type}"
+          @current_array_path = nil
+          @current_type_sub_path = sub_path
+          @types[@previous_header_type] ||= Types::SchemaType.new(name: @previous_header_type, fields: {})
+        else
+          # Object context: relative headers are siblings under the last absolute path
+          @current_type_sub_path = ""
+          full = @previous_header_path.empty? ? sub_path : "#{@previous_header_path}.#{sub_path}"
+          @current_header = full
           @current_header_kind = :object
           @current_type_name = nil
           @current_array_path = nil
@@ -441,7 +487,9 @@ module Odin
           if @current_type_name && @types[@current_type_name]
             old_type = @types[@current_type_name]
             new_fields = old_type.fields.dup
-            new_fields[field_name] = schema_field
+            # Relative sub-section ({.term}) prefixes the field key (e.g. term.effective)
+            type_key = @current_type_sub_path.empty? ? field_name : "#{@current_type_sub_path}.#{field_name}"
+            new_fields[type_key] = schema_field
             @types[@current_type_name] = Types::SchemaType.new(
               name: old_type.name,
               fields: new_fields,

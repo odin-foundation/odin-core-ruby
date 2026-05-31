@@ -21,6 +21,7 @@ require_relative "odin/validation/format_validators"
 require_relative "odin/validation/schema_parser"
 require_relative "odin/validation/validator"
 require_relative "odin/validation/schema_serializer"
+require_relative "odin/resolver/type_registry"
 require_relative "odin/resolver/import_resolver"
 require_relative "odin/transform/source_parsers"
 require_relative "odin/transform/format_exporters"
@@ -57,8 +58,15 @@ module Odin
       Validation::SchemaParser.new.parse_schema(text)
     end
 
-    def validate(doc, schema, options = {})
-      Validation::Validator.new.validate(doc, schema, options)
+    def validate(doc, schema, options = {}, registry = nil)
+      Validation::Validator.new.validate(doc, schema, options, registry)
+    end
+
+    # Resolve a schema's imports into a type registry, then validate the document.
+    def validate_with_imports(doc, schema, base_path, options = {}, resolver_options = {})
+      _flattened, registry = Resolver::ImportResolver.new(**resolver_options)
+                                                     .resolve_with_registry(schema, base_path: base_path)
+      validate(doc, schema, options, registry)
     end
 
     def diff(a, b)

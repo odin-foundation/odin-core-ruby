@@ -4,11 +4,12 @@ module Odin
   module Validation
     class Validator
       # Validate an OdinDocument against an OdinSchema
-      # Returns ValidationResult
-      def validate(doc, schema, options = {})
+      # Returns ValidationResult. Pass a registry to resolve @alias.typename refs.
+      def validate(doc, schema, options = {}, registry = nil)
         @errors = []
         @doc = doc
         @schema = schema
+        @registry = registry
         @strict = options.fetch(:strict, false)
 
         # V001: Required fields
@@ -857,10 +858,7 @@ module Odin
       def check_type_reference(path, type_ref)
         # Strip leading @ or @@ from type reference for lookup
         clean_ref = type_ref.sub(/\A@+/, "")
-        return if @schema.types.key?(type_ref)
-        return if @schema.types.key?(clean_ref)
-        # Check with namespace prefixes
-        return if @schema.types.any? { |name, _| name.end_with?(clean_ref) }
+        return unless lookup_type(clean_ref).nil?
 
         add_error(
           code: Errors::ValidationErrorCode::UNRESOLVED_REFERENCE,
@@ -869,6 +867,16 @@ module Odin
           expected: "valid type name",
           actual: type_ref
         )
+      end
+
+      # Resolve a type name: registry (namespaced imports) first, then local types.
+      def lookup_type(name)
+        type = @registry&.lookup(name)
+        return type if type
+
+        return @schema.types[name] if @schema.types.key?(name)
+
+        @schema.types.find { |type_name, _| type_name.end_with?(name) }&.last
       end
 
       def ref_path_matches_any?(ref_path)

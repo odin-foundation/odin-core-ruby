@@ -36,6 +36,23 @@ RSpec.describe "Golden Schema Tests" do
       schema = Odin.parse_schema(schema_text)
       expect(schema).not_to be_nil, "Failed to parse schema for #{id}"
 
+      # Structural cases: assert nesting (field keys present), not full equality
+      if test_case["structural"]
+        (expected["types"] || {}).each do |type_name, type_def|
+          actual_type = schema.types[type_name]
+          expect(actual_type).not_to be_nil, "Missing type definition: #{type_name}"
+          (type_def["fields"] || {}).each_key do |field_key|
+            expect(actual_type.fields).to have_key(field_key),
+              "Type #{type_name} missing field #{field_key}"
+          end
+        end
+        (expected["fields"] || {}).each_key do |field_path|
+          expect(schema.fields).to have_key(field_path),
+            "Missing root field #{field_path}"
+        end
+        next
+      end
+
       # Validate type definitions
       if expected["types"]
         expected["types"].each do |type_name, type_def|

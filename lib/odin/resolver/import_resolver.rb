@@ -10,7 +10,8 @@ module Odin
 
       def initialize(loader: nil)
         @loader = loader || method(:default_loader)
-        @resolved_paths = Set.new
+        @active_chain = Set.new   # paths currently being resolved (true-cycle detection)
+        @schema_cache = {}        # parsed schemas keyed by absolute path (diamond reuse)
         @total_loaded = 0
       end
 
@@ -24,6 +25,26 @@ module Odin
         end
 
         flatten(schema, imported_schemas)
+      end
+
+      # Resolve imports and return [flattened_schema, type_registry].
+      # base_path is the schema file path; imports resolve relative to its directory.
+      # The registry namespaces imported types by alias for @alias.typename lookup.
+      def resolve_with_registry(schema, base_path: ".")
+        import_dir = File.directory?(base_path) ? base_path : File.dirname(base_path)
+        imported_schemas = []
+        schema.imports.each do |imp|
+          resolve_import(imp, import_dir, imported_schemas, depth: 0)
+        end
+
+        registry = TypeRegistry.new
+        imported_schemas.each do |entry|
+          registry.register_all(entry[:schema].types, entry[:alias_name])
+        end
+        registry.register_all(schema.types, nil)
+
+        flattened = schema.imports.empty? ? schema : flatten(schema, imported_schemas)
+        [flattened, registry]
       end
 
       private
@@ -45,25 +66,32 @@ module Odin
 
         abs_path = resolve_path(base_path, imp.path)
 
-        if @resolved_paths.include?(abs_path)
+        # True cycle: path is on the current import chain.
+        if @active_chain.include?(abs_path)
           raise Errors::OdinError.new(
             Errors::ValidationErrorCode::CIRCULAR_REFERENCE,
             "Circular import detected: #{abs_path}"
           )
         end
 
-        @resolved_paths.add(abs_path)
-        @total_loaded += 1
+        imported_schema = @schema_cache[abs_path]
+        unless imported_schema
+          @total_loaded += 1
+          text = @loader.call(abs_path)
+          imported_schema = Validation::SchemaParser.new.parse_schema(text)
+          @schema_cache[abs_path] = imported_schema
+        end
 
-        text = @loader.call(abs_path)
-        imported_schema = Validation::SchemaParser.new.parse_schema(text)
-
-        # Recursively resolve nested imports
-        unless imported_schema.imports.empty?
-          import_dir = File.dirname(abs_path)
-          imported_schema.imports.each do |nested_imp|
-            resolve_import(nested_imp, import_dir, collected, depth: depth + 1)
+        @active_chain.add(abs_path)
+        begin
+          unless imported_schema.imports.empty?
+            import_dir = File.dirname(abs_path)
+            imported_schema.imports.each do |nested_imp|
+              resolve_import(nested_imp, import_dir, collected, depth: depth + 1)
+            end
           end
+        ensure
+          @active_chain.delete(abs_path)
         end
 
         collected << { schema: imported_schema, alias_name: imp.alias_name, path: abs_path }
