@@ -519,14 +519,28 @@ module Odin
 
         inline_discriminator_value = nil
         inline_if_condition = nil
+        inline_elif_condition = nil
+        inline_is_else = false
 
-        # Strip inline header directive: "Section :type "value"" or "Section :if "expr""
-        if name =~ /\A(.+?)\s+:(type|if)\s+"((?:[^"\\]|\\.)*)"\s*\z/
+        # Strip inline header directive: ":type "value"" keeps the quoted value;
+        # ":if"/":elif" capture the unquoted expression; ":else" is a bare flag.
+        if name =~ /\A(.+?)\s+:type\s+"((?:[^"\\]|\\.)*)"\s*\z/
           name = $1
-          case $2
-          when "type" then inline_discriminator_value = unescape_string($3)
-          when "if" then inline_if_condition = unescape_string($3)
+          inline_discriminator_value = unescape_string($2)
+        elsif name =~ /\A(.+?)\s+:(if|elif)\s+(.+?)\s*\z/
+          name = $1
+          expr = $3.strip
+          # A fully-quoted expression is the legacy infix form; strip the quotes.
+          if expr.length >= 2 && expr.start_with?('"') && expr.end_with?('"')
+            expr = unescape_string(expr[1...-1])
           end
+          case $2
+          when "if" then inline_if_condition = expr
+          when "elif" then inline_elif_condition = expr
+          end
+        elsif name =~ /\A(.+?)\s+:else\s*\z/
+          name = $1
+          inline_is_else = true
         end
 
         # Strip tabular column spec: "Items[] : col1, col2" -> "Items[]"
@@ -545,6 +559,8 @@ module Odin
         when_condition = nil
         each_source = nil
         if_condition = inline_if_condition
+        elif_condition = inline_elif_condition
+        is_else = inline_is_else
         pass = nil
         counter_name = nil
 
@@ -566,6 +582,10 @@ module Odin
             is_array = true
           when "_if"
             if_condition = unquote_or_raw(raw_val)
+          when "_elif"
+            elif_condition = unquote_or_raw(raw_val)
+          when "_else"
+            is_else = true
           when "_pass"
             pass = parse_int_literal(raw_val)
           when "_counter"
@@ -588,6 +608,8 @@ module Odin
           when_condition: when_condition,
           each_source: each_source,
           if_condition: if_condition,
+          elif_condition: elif_condition,
+          is_else: is_else,
           pass: pass,
           counter_name: counter_name,
           is_array: is_array

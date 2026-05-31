@@ -30,6 +30,15 @@ module Odin
         T009_LOOP_SOURCE_NOT_ARRAY   = "T009"
         T010_POSITION_OVERFLOW       = "T010"
         T011_INCOMPATIBLE_CONVERSION = "T011"
+        T012_DANGLING_BRANCH         = "T012"
+      end
+
+      # Create a T012 Dangling Branch error (elif/else with no preceding if).
+      def self.dangling_branch_error(directive)
+        TransformError.new(
+          "'#{directive}' segment has no preceding 'if'",
+          code: ErrorCodes::T012_DANGLING_BRANCH
+        )
       end
 
       # Create a T011 Incompatible Conversion error.
@@ -71,9 +80,7 @@ module Odin
         passes = transform_def.passes
         if passes.empty?
           # Single implicit pass
-          transform_def.segments.each do |segment|
-            process_segment(segment, source, context, output)
-          end
+          process_segment_list(transform_def.segments, source, context, output)
         else
           # Multi-pass: explicit passes first, then pass-0 (implicit)
           all_passes = passes.include?(0) ? passes : passes + [0]
@@ -84,12 +91,8 @@ module Odin
             end
             first_pass = false
 
-            transform_def.segments.each do |segment|
-              seg_pass = segment.pass || 0
-              next unless seg_pass == pass_num
-
-              process_segment(segment, source, context, output)
-            end
+            pass_segments = transform_def.segments.select { |s| (s.pass || 0) == pass_num }
+            process_segment_list(pass_segments, source, context, output)
           end
         end
 
@@ -459,6 +462,42 @@ module Odin
       end
 
       # ── Segment Processing ──
+
+      # Process a list of segments, honoring if/elif/else conditional chains.
+      # A chain is a run of consecutive segments: one `if`, then any `elif`, then
+      # an optional `else`. Only the first branch whose condition holds is emitted.
+      def process_segment_list(segments, source, context, output)
+        # :none = no active chain; :pending = chain open, none taken; :taken = a branch taken
+        branch = :none
+
+        segments.each do |segment|
+          if segment.if_condition
+            taken = evaluate_condition(segment.if_condition, source, context)
+            branch = taken ? :taken : :pending
+            process_segment(segment, source, context, output) if taken
+          elsif segment.elif_condition
+            if branch == :none
+              context.errors << self.class.dangling_branch_error("elif")
+              next
+            end
+            next if branch == :taken
+
+            taken = evaluate_condition(segment.elif_condition, source, context)
+            branch = taken ? :taken : :pending
+            process_segment(segment, source, context, output) if taken
+          elsif segment.is_else
+            if branch == :none
+              context.errors << self.class.dangling_branch_error("else")
+              next
+            end
+            process_segment(segment, source, context, output) if branch == :pending
+            branch = :none
+          else
+            branch = :none
+            process_segment(segment, source, context, output)
+          end
+        end
+      end
 
       def process_segment(segment, source, context, output, modifier_prefix: "")
         # Check _when condition

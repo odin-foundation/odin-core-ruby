@@ -127,6 +127,7 @@ module Odin
       attr_reader :name, :path, :array_index,
                   :field_mappings, :discriminator, :discriminator_value,
                   :when_condition, :each_source, :if_condition,
+                  :elif_condition, :is_else,
                   :children, :pass, :counter_name, :is_array
 
       def initialize(
@@ -139,6 +140,8 @@ module Odin
         when_condition: nil,
         each_source: nil,
         if_condition: nil,
+        elif_condition: nil,
+        is_else: false,
         children: [],
         pass: nil,
         counter_name: nil,
@@ -153,6 +156,8 @@ module Odin
         @when_condition = when_condition
         @each_source = each_source
         @if_condition = if_condition
+        @elif_condition = elif_condition
+        @is_else = is_else
         @children = children
         @pass = pass
         @counter_name = counter_name

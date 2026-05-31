@@ -1160,4 +1160,181 @@ RSpec.describe Odin::Transform::TransformEngine do
       expect(result).to be false
     end
   end
+
+  # ── Verb-Expression Segment Conditions ──
+
+  describe "verb-expression segment conditions" do
+    def header
+      <<~HDR
+        {$}
+        odin = "1.0.0"
+        transform = "1.0.0"
+        direction = "json->json"
+      HDR
+    end
+
+    it "includes section when verb condition is truthy" do
+      text = header + <<~ODIN
+        {Detail :if %eq @.status "active"}
+        flag = "yes"
+      ODIN
+      result = execute_transform(text, { "status" => "active" })
+      expect(result.output["Detail"]).to eq({ "flag" => "yes" })
+    end
+
+    it "omits section when verb condition is falsy" do
+      text = header + <<~ODIN
+        {Detail :if %eq @.status "active"}
+        flag = "yes"
+      ODIN
+      result = execute_transform(text, { "status" => "inactive" })
+      expect(result.output).not_to have_key("Detail")
+    end
+
+    it "evaluates %and" do
+      text = header + <<~ODIN
+        {Detail :if %and @.a @.b}
+        flag = "yes"
+      ODIN
+      expect(execute_transform(text, { "a" => true, "b" => true }).output).to have_key("Detail")
+      expect(execute_transform(text, { "a" => true, "b" => false }).output).not_to have_key("Detail")
+    end
+
+    it "evaluates %or" do
+      text = header + <<~ODIN
+        {Detail :if %or @.a @.b}
+        flag = "yes"
+      ODIN
+      expect(execute_transform(text, { "a" => false, "b" => true }).output).to have_key("Detail")
+      expect(execute_transform(text, { "a" => false, "b" => false }).output).not_to have_key("Detail")
+    end
+
+    it "evaluates %not" do
+      text = header + <<~ODIN
+        {Detail :if %not @.disabled}
+        flag = "yes"
+      ODIN
+      expect(execute_transform(text, { "disabled" => false }).output).to have_key("Detail")
+      expect(execute_transform(text, { "disabled" => true }).output).not_to have_key("Detail")
+    end
+
+    it "evaluates %lt" do
+      text = header + <<~ODIN
+        {Detail :if %lt @.age ##25}
+        flag = "yes"
+      ODIN
+      expect(execute_transform(text, { "age" => 20 }).output).to have_key("Detail")
+      expect(execute_transform(text, { "age" => 30 }).output).not_to have_key("Detail")
+    end
+
+    it "supports legacy quoted-infix condition (back-compat)" do
+      text = header + <<~ODIN
+        {Detail}
+        _if = "@.status = 'active'"
+        flag = "yes"
+      ODIN
+      expect(execute_transform(text, { "status" => "active" }).output).to have_key("Detail")
+      expect(execute_transform(text, { "status" => "off" }).output).not_to have_key("Detail")
+    end
+
+    it "accepts a verb-expression body condition (_if = %verb)" do
+      text = header + <<~ODIN
+        {Detail}
+        _if = %eq @.status "active"
+        flag = "yes"
+      ODIN
+      expect(execute_transform(text, { "status" => "active" }).output).to have_key("Detail")
+      expect(execute_transform(text, { "status" => "off" }).output).not_to have_key("Detail")
+    end
+  end
+
+  # ── Conditional Chains (if/elif/else) ──
+
+  describe "conditional chains" do
+    def chain_transform
+      <<~ODIN
+        {$}
+        odin = "1.0.0"
+        transform = "1.0.0"
+        direction = "json->json"
+
+        {High :if %eq @.tier "dui"}
+        band = "high"
+
+        {Young :elif %lt @.age ##25}
+        band = "young"
+
+        {Standard :else}
+        band = "standard"
+      ODIN
+    end
+
+    it "emits only the if branch when its condition holds" do
+      result = execute_transform(chain_transform, { "tier" => "dui", "age" => 30 })
+      expect(result.output).to have_key("High")
+      expect(result.output).not_to have_key("Young")
+      expect(result.output).not_to have_key("Standard")
+      expect(result.success?).to be true
+    end
+
+    it "falls through to a matching elif branch" do
+      result = execute_transform(chain_transform, { "tier" => "standard", "age" => 20 })
+      expect(result.output).not_to have_key("High")
+      expect(result.output["Young"]).to eq({ "band" => "young" })
+      expect(result.output).not_to have_key("Standard")
+    end
+
+    it "emits the else branch when no condition matches" do
+      result = execute_transform(chain_transform, { "tier" => "standard", "age" => 40 })
+      expect(result.output).not_to have_key("High")
+      expect(result.output).not_to have_key("Young")
+      expect(result.output["Standard"]).to eq({ "band" => "standard" })
+    end
+
+    it "supports an if-only chain" do
+      text = <<~ODIN
+        {$}
+        odin = "1.0.0"
+        transform = "1.0.0"
+        direction = "json->json"
+
+        {High :if %eq @.tier "dui"}
+        band = "high"
+      ODIN
+      expect(execute_transform(text, { "tier" => "dui" }).output).to have_key("High")
+      expect(execute_transform(text, { "tier" => "std" }).output).not_to have_key("High")
+    end
+
+    it "raises T012 for an orphan elif" do
+      text = <<~ODIN
+        {$}
+        odin = "1.0.0"
+        transform = "1.0.0"
+        direction = "json->json"
+
+        {Orphan :elif %eq @.tier "dui"}
+        band = "x"
+      ODIN
+      result = execute_transform(text, { "tier" => "dui" })
+      expect(result.success?).to be false
+      expect(result.errors.first.code).to eq("T012")
+      expect(result.errors.first.message).to eq("'elif' segment has no preceding 'if'")
+    end
+
+    it "raises T012 for an orphan else" do
+      text = <<~ODIN
+        {$}
+        odin = "1.0.0"
+        transform = "1.0.0"
+        direction = "json->json"
+
+        {Orphan :else}
+        band = "x"
+      ODIN
+      result = execute_transform(text, {})
+      expect(result.success?).to be false
+      expect(result.errors.first.code).to eq("T012")
+      expect(result.errors.first.message).to eq("'else' segment has no preceding 'if'")
+    end
+  end
 end

@@ -588,6 +588,30 @@ RSpec.describe Odin::Transform::TransformParser do
       expect(seg.if_condition).to eq("@driver.has_dui = true")
     end
 
+    it "parses header-inline :if with an unquoted verb expression" do
+      text = make_transform("{High :if %eq @driver.tier \"dui\"}\nband = \"high\"")
+      result = parser.parse(text)
+      seg = result.segments.find { |s| s.name == "High" }
+      expect(seg).not_to be_nil
+      expect(seg.if_condition).to eq("%eq @driver.tier \"dui\"")
+    end
+
+    it "parses header-inline :elif with an unquoted verb expression" do
+      text = make_transform("{Young :elif %lt @driver.age ##25}\nband = \"young\"")
+      result = parser.parse(text)
+      seg = result.segments.find { |s| s.name == "Young" }
+      expect(seg).not_to be_nil
+      expect(seg.elif_condition).to eq("%lt @driver.age ##25")
+    end
+
+    it "parses header-inline :else as a bare flag" do
+      text = make_transform("{Standard :else}\nband = \"standard\"")
+      result = parser.parse(text)
+      seg = result.segments.find { |s| s.name == "Standard" }
+      expect(seg).not_to be_nil
+      expect(seg.is_else).to be true
+    end
+
     it "parses segment with header-inline :type" do
       text = make_transform("{Auto :type \"auto\"}\n_discriminator = @.type\nMake = @.make")
       result = parser.parse(text)
