@@ -96,7 +96,7 @@ RSpec.describe "Golden End-to-End Tests" do
     when Odin::Types::OdinString then Odin::Types::DynValue.of_string(val.value)
     when Odin::Types::OdinInteger then Odin::Types::DynValue.of_integer(val.value)
     when Odin::Types::OdinNumber then Odin::Types::DynValue.of_float(val.value)
-    when Odin::Types::OdinCurrency then Odin::Types::DynValue.of_currency(val.value)
+    when Odin::Types::OdinCurrency then Odin::Types::DynValue.of_currency(val.value.to_f, val.decimal_places || 2, val.currency_code)
     when Odin::Types::OdinDate then Odin::Types::DynValue.of_date(val.raw || val.value.to_s)
     when Odin::Types::OdinTimestamp then Odin::Types::DynValue.of_timestamp(val.raw || val.value.to_s)
     when Odin::Types::OdinTime then Odin::Types::DynValue.of_time(val.value)

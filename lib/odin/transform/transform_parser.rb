@@ -107,7 +107,7 @@ module Odin
         pos len field trim type date time timestamp boolean integer number
         currency percent binary duration reference leftPad rightPad truncate
         upper lower default decimals currencyCode required confidential
-        deprecated attr if unless omitNull omitEmpty
+        deprecated attr ns if unless omitNull omitEmpty
       ].freeze
 
       class ParseError < StandardError
@@ -156,6 +156,7 @@ module Odin
         accumulator_sections = {} # section_name -> [assignments]
         table_sections = {} # table_name -> { columns: [...], rows: [...] }
         source_section_fields = {} # {$source} section fields
+        target_namespaces = {} # {$target.namespace} prefix -> URI (insertion order)
 
         lines.each do |line|
           stripped = line.strip
@@ -178,6 +179,9 @@ module Odin
             elsif section_name == "$source"
               current_section = section_name
               current_section_type = :source
+            elsif section_name == "$target.namespace"
+              current_section = section_name
+              current_section_type = :target_namespace
             elsif section_name == "$accumulator" || section_name == "$accumulators"
               current_section = section_name
               current_section_type = :accumulator
@@ -221,6 +225,8 @@ module Odin
               header_fields[key] = raw_value
             when :source
               source_section_fields[key] = raw_value
+            when :target_namespace
+              target_namespaces[key] = unquote(raw_value) || raw_value
             when :const
               const_sections[current_section] << { key: key, value: raw_value }
             when :accumulator
@@ -235,7 +241,7 @@ module Odin
         end
 
         # Parse header (merge source section into source_options)
-        header = parse_header(header_fields, source_section_fields)
+        header = parse_header(header_fields, source_section_fields, target_namespaces)
 
         # Parse constants from header fields and {$const} sections
         constants = parse_constants(header_fields, sections)
@@ -352,7 +358,7 @@ module Odin
 
       # ── Header Parsing ──
 
-      def parse_header(fields, source_section_fields = {})
+      def parse_header(fields, source_section_fields = {}, target_namespaces = {})
         direction = unquote(fields["direction"])
         target_format = unquote(fields["target.format"])
         odin_version = unquote(fields["odin"]) || "1.0.0"
@@ -394,6 +400,7 @@ module Odin
           enforce_confidential: enforce_confidential,
           source_options: source_options,
           target_options: target_options,
+          target_namespaces: target_namespaces,
           strict_types: strict_types,
           id: id,
           name: name

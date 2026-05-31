@@ -417,7 +417,8 @@ module Odin
         when Types::OdinBoolean then Types::DynValue.of_bool(val.value)
         when Types::OdinNull then Types::DynValue.of_null
         when Types::OdinCurrency
-          Types::DynValue.of_currency(val.value, val.respond_to?(:decimal_places) ? val.decimal_places : 2)
+          Types::DynValue.of_currency(val.value, val.respond_to?(:decimal_places) ? val.decimal_places : 2,
+                                      val.respond_to?(:currency_code) ? val.currency_code : nil)
         when Types::OdinReference then Types::DynValue.of_reference(val.path)
         when Types::OdinBinary then Types::DynValue.of_binary(val.data)
         else Types::DynValue.of_null
@@ -1650,17 +1651,23 @@ module Odin
         indent_val = topts["indent"]
         indent_size = indent_val ? parse_target_int(indent_val, 2) : 2
         indent_str = " " * indent_size
+        # emitTypeHints=false produces plain XML with no odin: attributes/namespace
+        eth_val = topts["emitTypeHints"]
+        emit_type_hints = eth_val != "false" && eth_val != "?false"
+        namespaces = transform_def.header.target_namespaces || {}
 
         xml = +""
         xml << %{<?xml version="1.0" encoding="UTF-8"?>\n} if include_declaration
 
-        # Collect which fields have :attr directive per segment
+        # Collect per-field :attr and :ns directives per segment
         attr_fields = {}
+        ns_fields = {}
         transform_def.segments.each do |segment|
           segment.field_mappings.each do |mapping|
-            if mapping.directives.any? { |d| d.name == "attr" }
-              attr_fields["#{segment.name}.#{mapping.target_field}"] = true
-            end
+            full = "#{segment.name}.#{mapping.target_field}"
+            attr_fields[full] = true if mapping.directives.any? { |d| d.name == "attr" }
+            ns_dir = mapping.directives.find { |d| d.name == "ns" }
+            ns_fields[full] = ns_dir.value if ns_dir
           end
         end
 
@@ -1677,7 +1684,9 @@ module Odin
                       []
                     end
             items.each do |item|
-              xml << render_xml_segment_element(seg_name, item, segment, attr_fields, is_array: true, indent_str: indent_str)
+              xml << render_xml_segment_element(seg_name, item, segment, attr_fields, ns_fields,
+                                                is_array: true, indent_str: indent_str,
+                                                emit_type_hints: emit_type_hints, namespaces: namespaces)
             end
           else
             data = if seg_data.is_a?(Types::DynValue)
@@ -1687,14 +1696,16 @@ module Odin
                    else
                      output_dv
                    end
-            xml << render_xml_segment_element(seg_name, data, segment, attr_fields, is_array: false, indent_str: indent_str)
+            xml << render_xml_segment_element(seg_name, data, segment, attr_fields, ns_fields,
+                                              is_array: false, indent_str: indent_str,
+                                              emit_type_hints: emit_type_hints, namespaces: namespaces)
           end
         end
 
         xml
       end
 
-      def render_xml_segment_element(seg_name, data, segment, attr_fields, is_array: false, indent_str: "  ")
+      def render_xml_segment_element(seg_name, data, segment, attr_fields, ns_fields, is_array: false, indent_str: "  ", emit_type_hints: true, namespaces: {})
         return "" unless data.is_a?(Types::DynValue) && data.object?
 
         entries = data.value
@@ -1718,19 +1729,33 @@ module Odin
           end
         end
 
-        # Non-array segments always get xmlns:odin namespace
-        ns = !is_array ? ' xmlns:odin="https://odin.foundation/ns"' : ""
+        # xmlns:odin only when type hints are emitted; omitted on namespaced roots without typed content
+        include_odin_ns = emit_type_hints && !is_array && (namespaces.empty? || has_typed)
+        odin_ns = include_odin_ns ? ' xmlns:odin="https://odin.foundation/ns"' : ""
+        ns_decls = !is_array ? build_xml_namespace_decls(namespaces) : ""
         attrs = attr_parts.empty? ? "" : " #{attr_parts.join(' ')}"
 
-        xml = +"<#{seg_name}#{ns}#{attrs}>\n"
+        xml = +"<#{seg_name}#{odin_ns}#{ns_decls}#{attrs}>\n"
         child_keys.each do |key|
           val = entries[key]
           next unless val
-          type_attr = xml_type_attr(val)
-          xml << "#{indent_str}<#{key}#{type_attr}>#{xml_escape_attr(val_to_xml_string(val))}</#{key}>\n"
+          tag = ns_qualify_xml(key, ns_fields["#{seg_name}.#{key}"])
+          type_attr = emit_type_hints ? xml_type_attr(val) : ""
+          xml << "#{indent_str}<#{tag}#{type_attr}>#{xml_escape_attr(val_to_xml_string(val))}</#{tag}>\n"
         end
         xml << "</#{seg_name}>\n"
         xml
+      end
+
+      # Build xmlns:<prefix> declarations for target namespaces in insertion order
+      def build_xml_namespace_decls(namespaces)
+        return "" if namespaces.nil? || namespaces.empty?
+        namespaces.map { |prefix, uri| " xmlns:#{prefix}=\"#{xml_escape_attr(uri)}\"" }.join
+      end
+
+      # Qualify an element name with its namespace prefix when :ns is set
+      def ns_qualify_xml(key, prefix)
+        prefix ? "#{prefix}:#{key}" : key
       end
 
       def xml_type_attr(dv)
@@ -1742,8 +1767,8 @@ module Odin
           v = dv.value.to_f
           v == v.to_i.to_f && v.abs < 1e15 ? ' odin:type="integer"' : ' odin:type="number"'
         when :currency, :currency_raw
-          v = dv.value.to_f
-          v == v.to_i.to_f && v.abs < 1e15 ? ' odin:type="integer"' : ' odin:type="number"'
+          # every currency is first-class; a coded currency also carries its ISO code
+          dv.currency_code ? " odin:type=\"currency\" odin:currencyCode=\"#{dv.currency_code}\"" : ' odin:type="currency"'
         when :percent then ' odin:type="percent"'
         else ""
         end
@@ -1757,8 +1782,12 @@ module Odin
         when :float then FormatExporters.send(:format_number, dv.value)
         when :string then dv.value
         when :currency
-          v = dv.value.to_f
-          v == v.to_i && v.abs < 1e15 ? v.to_i.to_s : v.to_s
+          # render at the value's decimal scale (default 2), preserving precision
+          dp = dv.decimal_places || 2
+          format("%.#{dp}f", dv.value.to_f)
+        when :currency_raw
+          # raw string already carries exact precision
+          dv.value.to_s
         else FormatExporters.send(:dynvalue_to_string, dv)
         end
       end

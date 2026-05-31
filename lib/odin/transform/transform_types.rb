@@ -92,7 +92,7 @@ module Odin
     class TransformHeader
       attr_reader :odin_version, :transform_version, :direction,
                   :target_format, :enforce_confidential,
-                  :source_options, :target_options,
+                  :source_options, :target_options, :target_namespaces,
                   :strict_types, :id, :name
 
       def initialize(
@@ -103,6 +103,7 @@ module Odin
         enforce_confidential: ConfidentialMode::NONE,
         source_options: {},
         target_options: {},
+        target_namespaces: {},
         strict_types: false,
         id: nil,
         name: nil
@@ -114,6 +115,7 @@ module Odin
         @enforce_confidential = enforce_confidential
         @source_options = source_options
         @target_options = target_options
+        @target_namespaces = target_namespaces
         @strict_types = strict_types
         @id = id
         @name = name
