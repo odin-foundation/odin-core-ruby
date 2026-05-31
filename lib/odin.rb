@@ -45,6 +45,13 @@ module Odin
       Parsing::OdinParser.new.parse(text, options)
     end
 
+    # Parse a chained document (one or more documents separated by ---) into
+    # the full list of documents. A single document yields a one-element array.
+    def parse_documents(text, options = nil)
+      result = parse(text, options)
+      result.respond_to?(:documents) ? result.documents : [result]
+    end
+
     def stringify(doc, options = {})
       Serialization::Stringify.new(options).stringify(doc)
     end

@@ -64,7 +64,15 @@ module Odin
             "Invalid numeric format"
           )
         end
-        val = Integer(Float(raw))
+        fval = Float(raw)
+        unless fval == fval.to_i
+          raise Errors::ParseError.new(
+            Errors::ParseErrorCode::INVALID_TYPE_PREFIX,
+            token.line, token.column,
+            "Integer (##) value cannot have a fractional part: #{raw}"
+          )
+        end
+        val = fval.to_i
         # Beyond JS safe integer range, store raw
         safe = val.abs <= 9_007_199_254_740_991
         Types::OdinInteger.new(val, raw: safe && raw.length <= 15 ? nil : raw)

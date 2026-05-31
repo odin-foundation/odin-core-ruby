@@ -43,20 +43,13 @@ RSpec.describe "Golden Parse Tests" do
 
       # Handle documents array (chaining tests)
       if expected["documents"]
-        if doc.respond_to?(:documents)
-          docs = doc.documents
-          expected["documents"].each_with_index do |exp_doc, i|
-            actual_doc = docs[i]
-            next unless actual_doc
-
-            assert_assignments(actual_doc, exp_doc["assignments"]) if exp_doc["assignments"]
-            assert_metadata(actual_doc, exp_doc["metadata"]) if exp_doc["metadata"]
-          end
-        else
-          # Single document - check first expected doc
-          exp_doc = expected["documents"][0]
-          assert_assignments(doc, exp_doc["assignments"]) if exp_doc["assignments"]
-          assert_metadata(doc, exp_doc["metadata"]) if exp_doc["metadata"]
+        docs = Odin.parse_documents(input_text)
+        expect(docs.length).to eq(expected["documents"].length)
+        expected["documents"].each_with_index do |exp_doc, i|
+          actual_doc = docs[i]
+          expect(actual_doc).not_to be_nil, "Missing document at index #{i}"
+          assert_document_metadata(actual_doc, exp_doc["metadata"]) if exp_doc["metadata"]
+          assert_assignments(actual_doc, exp_doc["assignments"]) if exp_doc["assignments"]
         end
         next
       end
@@ -101,6 +94,18 @@ RSpec.describe "Golden Parse Tests" do
         expect(actual).not_to be_nil, "Missing metadata key: #{key}"
         assert_value_matches(actual, expected_value, "$.#{key}")
       end
+    end
+  end
+
+  # Per-document metadata: fixture values are raw primitives, compare against
+  # the source/raw form (dates by raw YYYY-MM-DD).
+  def assert_document_metadata(doc, expected_metadata)
+    return unless expected_metadata
+    expected_metadata.each do |key, expected_value|
+      actual = doc.metadata[key]
+      expect(actual).not_to be_nil, "Missing metadata key: #{key}"
+      actual_raw = actual.respond_to?(:raw) && actual.raw ? actual.raw : actual.value
+      expect(actual_raw.to_s).to eq(expected_value.to_s)
     end
   end
 

@@ -996,4 +996,93 @@ RSpec.describe Odin::Parsing::OdinParser do
       expect(doc).to be_a(Odin::Types::OdinDocument)
     end
   end
+
+  # ──── Top-level metadata assignment ($.path = value) ────
+
+  describe "top-level metadata assignment" do
+    it "routes a $.path line to document metadata" do
+      doc = parse('$.id = "a"')
+      expect(doc.metadata["id"].value).to eq("a")
+      expect(doc.get("$.id")).to be_nil
+    end
+
+    it "supports dotted metadata keys" do
+      doc = parse('$.custom.field = "v"')
+      expect(doc.metadata["custom.field"].value).to eq("v")
+    end
+
+    it "round-trips canonical output idempotently" do
+      doc = parse("{$}\nodin = \"1.0.0\"\nid = \"a\"\n\n{}\nname = \"John\"")
+      canonical = Odin.canonicalize(doc)
+      reparsed = Odin.parse(canonical)
+      expect(Odin.canonicalize(reparsed)).to eq(canonical)
+      expect(reparsed.metadata["id"].value).to eq("a")
+      expect(reparsed.get("name").value).to eq("John")
+    end
+  end
+
+  # ──── Integer (##) decimal rejection ────
+
+  describe "integer decimal rejection" do
+    it "rejects a fractional integer" do
+      expect { parse("x = ##4.2") }.to raise_error(Odin::Errors::ParseError) do |e|
+        expect(e.code).to eq("P006")
+      end
+    end
+
+    it "rejects a negative fractional integer" do
+      expect { parse("x = ##-3.7") }.to raise_error(Odin::Errors::ParseError) do |e|
+        expect(e.code).to eq("P006")
+      end
+    end
+
+    it "accepts integral scientific notation" do
+      doc = parse("x = ##1e3")
+      expect(doc.get("x").type).to eq(:integer)
+      expect(doc.get("x").value).to eq(1000)
+    end
+
+    it "accepts plain integers" do
+      doc = parse("x = ##42")
+      expect(doc.get("x").value).to eq(42)
+    end
+  end
+
+  # ──── @$.path meta references ────
+
+  describe "meta references" do
+    it "parses @$.path" do
+      doc = parse("x = @$.id")
+      expect(doc.get("x").type).to eq(:reference)
+      expect(doc.get("x").path).to eq("$.id")
+    end
+
+    it "parses a nested @$.path" do
+      doc = parse("x = @$.i18n.en.name")
+      expect(doc.get("x").path).to eq("$.i18n.en.name")
+    end
+
+    it "still parses @$const.NAME" do
+      doc = parse("x = @$const.NAME")
+      expect(doc.get("x").path).to eq("$const.NAME")
+    end
+  end
+
+  # ──── Document chain API ────
+
+  describe ".parse_documents" do
+    it "returns all documents in a --- chain" do
+      docs = Odin.parse_documents("{$}\nid = \"a\"\n\n{}\nx = \"1\"\n\n---\n\n{$}\nid = \"b\"\n\n{}\nx = \"2\"")
+      expect(docs.length).to eq(2)
+      expect(docs[0].metadata["id"].value).to eq("a")
+      expect(docs[1].metadata["id"].value).to eq("b")
+      expect(docs[1].get("x").value).to eq("2")
+    end
+
+    it "wraps a single document in a one-element array" do
+      docs = Odin.parse_documents('name = "John"')
+      expect(docs.length).to eq(1)
+      expect(docs[0].get("name").value).to eq("John")
+    end
+  end
 end

@@ -196,6 +196,8 @@ module Odin
             scan_identifier(line, col)
           when 38 # &
             scan_identifier(line, col)
+          when 36 # $
+            scan_meta_path(line, col)
           when 91 # [
             scan_array_indexed_path(line, col)
           else
@@ -571,8 +573,15 @@ module Odin
           return
         end
 
+        prefix = +""
+        if !s.eos? && s.string.getbyte(s.pos) == 36 # @$ meta reference
+          prefix << "$"
+          s.pos += 1; @col += 1
+        end
+
         path = s.scan(RE_REF_PATH) || ""
         @col += path.length
+        path = prefix + path
         # Normalize leading zeros in array indices: [007] -> [7]
         path = path.gsub(/\[(\d+)\]/) { "[#{$1.to_i}]" }
         emit(TokenType::REFERENCE, path, line, col)
@@ -698,6 +707,25 @@ module Odin
           @col += idx.length
         end
         # Continue with identifier chars, dots, and more brackets
+        loop do
+          if (chunk = s.scan(/[a-zA-Z0-9_.\-]+/))
+            word << chunk
+            @col += chunk.length
+          elsif (idx = s.scan(RE_ARRAY_INDEX))
+            word << idx
+            @col += idx.length
+          else
+            break
+          end
+        end
+        emit(TokenType::PATH, word, line, col)
+      end
+
+      # Top-level metadata path: $ or $.foo (from canonical output)
+      def scan_meta_path(line, col)
+        s = @scanner
+        word = +"$"
+        s.pos += 1; @col += 1 # skip $
         loop do
           if (chunk = s.scan(/[a-zA-Z0-9_.\-]+/))
             word << chunk

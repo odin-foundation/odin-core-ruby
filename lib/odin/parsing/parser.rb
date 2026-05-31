@@ -393,6 +393,22 @@ module Odin
         # Track array indices
         track_array_index(full_path, path_token)
 
+        # Top-level metadata assignment ($.key = value), e.g. from canonical output
+        if !@metadata_mode && (full_path.start_with?("$.") || full_path == "$")
+          meta_key = full_path.start_with?("$.") ? full_path[2..] : ""
+          unless meta_key.empty?
+            if @current_metadata.key?(meta_key)
+              raise Errors::ParseError.new(
+                Errors::ParseErrorCode::DUPLICATE_PATH_ASSIGNMENT,
+                path_token.line, path_token.column,
+                "Duplicate metadata key: #{meta_key}"
+              )
+            end
+            @current_metadata[meta_key] = value
+          end
+          return
+        end
+
         if @metadata_mode
           # Check duplicate in metadata
           if @current_metadata.key?(full_path)

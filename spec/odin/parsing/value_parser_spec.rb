@@ -84,6 +84,22 @@ RSpec.describe Odin::Parsing::ValueParser do
       expect(v.raw).to eq("9007199254740992")
     end
 
+    it "rejects a fractional integer" do
+      expect { described_class.parse_value(make_token(TT::INTEGER, "4.2")) }
+        .to raise_error(Odin::Errors::ParseError) { |e| expect(e.code).to eq("P006") }
+    end
+
+    it "rejects a negative fractional integer" do
+      expect { described_class.parse_value(make_token(TT::INTEGER, "-3.7")) }
+        .to raise_error(Odin::Errors::ParseError) { |e| expect(e.code).to eq("P006") }
+    end
+
+    it "accepts integral scientific notation" do
+      v = described_class.parse_value(make_token(TT::INTEGER, "1e3"))
+      expect(v.type).to eq(:integer)
+      expect(v.value).to eq(1000)
+    end
+
     # --- Currency ---
     it "parses currency" do
       v = described_class.parse_value(make_token(TT::CURRENCY, "99.99"))
