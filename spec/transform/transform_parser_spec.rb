@@ -580,6 +580,22 @@ RSpec.describe Odin::Transform::TransformParser do
       expect(seg.if_condition).not_to be_nil
     end
 
+    it "parses segment with header-inline :if" do
+      text = make_transform("{DuiDetails :if \"@driver.has_dui = true\"}\nState = @driver.dui.state")
+      result = parser.parse(text)
+      seg = result.segments.find { |s| s.name == "DuiDetails" }
+      expect(seg).not_to be_nil
+      expect(seg.if_condition).to eq("@driver.has_dui = true")
+    end
+
+    it "parses segment with header-inline :type" do
+      text = make_transform("{Auto :type \"auto\"}\n_discriminator = @.type\nMake = @.make")
+      result = parser.parse(text)
+      seg = result.segments.find { |s| s.name == "Auto" }
+      expect(seg).not_to be_nil
+      expect(seg.discriminator_value).to eq("auto")
+    end
+
     it "parses segment with array index {Items[0]}" do
       text = make_transform("{Items[0]}\nName = @.items[0].name")
       result = parser.parse(text)

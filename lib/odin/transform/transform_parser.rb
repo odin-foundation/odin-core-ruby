@@ -517,6 +517,18 @@ module Odin
         array_index = nil
         is_array = false
 
+        inline_discriminator_value = nil
+        inline_if_condition = nil
+
+        # Strip inline header directive: "Section :type "value"" or "Section :if "expr""
+        if name =~ /\A(.+?)\s+:(type|if)\s+"((?:[^"\\]|\\.)*)"\s*\z/
+          name = $1
+          case $2
+          when "type" then inline_discriminator_value = unescape_string($3)
+          when "if" then inline_if_condition = unescape_string($3)
+          end
+        end
+
         # Strip tabular column spec: "Items[] : col1, col2" -> "Items[]"
         name = $1 if name =~ /\A(.+\[\d*\])\s*:.*\z/
 
@@ -529,10 +541,10 @@ module Odin
 
         field_mappings = []
         discriminator = nil
-        discriminator_value = nil
+        discriminator_value = inline_discriminator_value
         when_condition = nil
         each_source = nil
-        if_condition = nil
+        if_condition = inline_if_condition
         pass = nil
         counter_name = nil
 

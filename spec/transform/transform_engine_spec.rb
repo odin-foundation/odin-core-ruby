@@ -527,6 +527,40 @@ RSpec.describe Odin::Transform::TransformEngine do
     end
   end
 
+  # ── Header-Inline :if Conditional Sections ──
+
+  describe "header-inline :if conditional" do
+    it "includes section when condition holds" do
+      text = <<~ODIN
+        {$}
+        odin = "1.0.0"
+        transform = "1.0.0"
+        direction = "json->json"
+
+        {DuiDetails :if "@driver.has_dui = true"}
+        State = @driver.dui.state
+      ODIN
+      source = { "driver" => { "has_dui" => true, "dui" => { "state" => "TX" } } }
+      result = execute_transform(text, source)
+      expect(result.output["DuiDetails"]["State"]).to eq("TX")
+    end
+
+    it "omits section when condition fails" do
+      text = <<~ODIN
+        {$}
+        odin = "1.0.0"
+        transform = "1.0.0"
+        direction = "json->json"
+
+        {DuiDetails :if "@driver.has_dui = true"}
+        State = @driver.dui.state
+      ODIN
+      source = { "driver" => { "has_dui" => false } }
+      result = execute_transform(text, source)
+      expect(result.output).not_to have_key("DuiDetails")
+    end
+  end
+
   # ── Discriminator ──
 
   describe "discriminator-based segment selection" do
