@@ -1105,4 +1105,65 @@ RSpec.describe "DateTime Verbs" do
       expect(invoke("formatLocaleDate", dv.of_null).null?).to be true
     end
   end
+
+  # ── nextBusinessDay ──
+
+  describe "nextBusinessDay" do
+    it "advances Wednesday to Thursday" do
+      expect(invoke("nextBusinessDay", dv.of_string("2024-01-17")).to_string).to eq("2024-01-18")
+    end
+
+    it "advances Friday to Monday" do
+      expect(invoke("nextBusinessDay", dv.of_string("2024-01-19")).to_string).to eq("2024-01-22")
+    end
+
+    it "advances Saturday to Monday" do
+      expect(invoke("nextBusinessDay", dv.of_string("2024-01-20")).to_string).to eq("2024-01-22")
+    end
+
+    it "advances Sunday to Monday" do
+      expect(invoke("nextBusinessDay", dv.of_string("2024-01-21")).to_string).to eq("2024-01-22")
+    end
+
+    it "returns null for null" do
+      expect(invoke("nextBusinessDay", dv.of_null).null?).to be true
+    end
+  end
+
+  # ── formatDuration ──
+
+  describe "formatDuration" do
+    it "formats a number of seconds spanning days" do
+      expect(invoke("formatDuration", dv.of_integer(90061)).to_string)
+        .to eq("1 day, 1 hour, 1 minute, 1 second")
+    end
+
+    it "omits zero components for sub-day seconds" do
+      expect(invoke("formatDuration", dv.of_integer(3661)).to_string)
+        .to eq("1 hour, 1 minute, 1 second")
+    end
+
+    it "accepts numeric seconds passed as a string" do
+      expect(invoke("formatDuration", dv.of_string("3661")).to_string)
+        .to eq("1 hour, 1 minute, 1 second")
+    end
+
+    it "formats an ISO 8601 time duration" do
+      expect(invoke("formatDuration", dv.of_string("PT2H30M")).to_string)
+        .to eq("2 hours, 30 minutes")
+    end
+
+    it "formats an ISO 8601 day duration" do
+      expect(invoke("formatDuration", dv.of_string("P1DT6H")).to_string)
+        .to eq("1 day, 6 hours")
+    end
+
+    it "returns null for negative seconds" do
+      expect(invoke("formatDuration", dv.of_integer(-5)).null?).to be true
+    end
+
+    it "returns null for null" do
+      expect(invoke("formatDuration", dv.of_null).null?).to be true
+    end
+  end
 end

@@ -544,17 +544,38 @@ module Odin
             return dv.of_null if v.nil? || v.null?
             d = DateTimeVerbs.parse_date(v)
             return dv.of_null unless d
-            if d.saturday?
-              d += 2
-            elsif d.sunday?
+            loop do
               d += 1
+              break unless d.saturday? || d.sunday?
             end
             dv.of_string(DateTimeVerbs.format_date_str(d))
           }
 
           registry["formatDuration"] = ->(args, _ctx) {
             return dv.of_null if args.empty?
-            iso = args[0]&.to_string
+            arg = args[0]
+            return dv.of_null if arg.nil? || arg.null?
+
+            iso = arg.to_string
+
+            # Numeric seconds (typed or numeric string): expand into d/h/m/s.
+            if arg.numeric? || iso.match?(/\A\d+(?:\.\d+)?\z/)
+              total = arg.numeric? ? arg.to_number.to_f : iso.to_f
+              return dv.of_null if total < 0
+              days = (total / 86400).floor
+              total -= days * 86400
+              hours = (total / 3600).floor
+              total -= hours * 3600
+              minutes = (total / 60).floor
+              seconds = total - minutes * 60
+              parts = []
+              parts << DateTimeVerbs.duration_part(days, "day") unless days == 0
+              parts << DateTimeVerbs.duration_part(hours, "hour") unless hours == 0
+              parts << DateTimeVerbs.duration_part(minutes, "minute") unless minutes == 0
+              parts << DateTimeVerbs.duration_part(seconds, "second") unless seconds == 0
+              return dv.of_string(parts.empty? ? "0 seconds" : parts.join(", "))
+            end
+
             return dv.of_null if iso.nil? || !iso.start_with?("P")
             parts = []
             in_time = false

@@ -320,6 +320,30 @@ module Odin
         (val >> shift) & 0xFF
       end
 
+      # Extract a [key, value] pair from a %toObject entry in either
+      # pair-array ([k, v]) or {key, value} / {k, v} object form.
+      def to_object_pair(item)
+        return nil unless item.is_a?(Types::DynValue)
+
+        if item.array?
+          items = item.value || []
+          return nil if items.length < 2
+          return [items[0].to_string, items[1]]
+        end
+
+        if item.object?
+          entries = item.value || {}
+          if entries.key?("key") && entries.key?("value")
+            return [entries["key"].to_string, entries["value"]]
+          end
+          if entries.key?("k") && entries.key?("v")
+            return [entries["k"].to_string, entries["v"]]
+          end
+        end
+
+        nil
+      end
+
       def deep_to_ruby(obj)
         case obj
         when Types::DynValue
@@ -2987,9 +3011,17 @@ module Odin
           elsif v.object?
             v
           elsif v.array?
-            obj = {}
-            v.value.each_with_index { |item, i| obj[i.to_s] = item }
-            Types::DynValue.of_object(obj)
+            items = v.value || []
+            pairs = items.map { |item| to_object_pair(item) }
+            if !items.empty? && pairs.all?
+              obj = {}
+              pairs.each { |k, val| obj[k] = val }
+              Types::DynValue.of_object(obj)
+            else
+              obj = {}
+              items.each_with_index { |item, i| obj[i.to_s] = item }
+              Types::DynValue.of_object(obj)
+            end
           else
             Types::DynValue.of_object({ "value" => v })
           end

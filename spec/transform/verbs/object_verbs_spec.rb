@@ -240,4 +240,49 @@ RSpec.describe "Object Verbs" do
       expect(result.get("y")).to eq(dv.of_integer(20))
     end
   end
+
+  # ── toObject ──
+
+  describe "toObject" do
+    it "builds an object from [key, value] pair arrays" do
+      pairs = dv.of_array([
+        dv.of_array([dv.of_string("name"), dv.of_string("Ada")]),
+        dv.of_array([dv.of_string("role"), dv.of_string("admin")]),
+        dv.of_array([dv.of_string("level"), dv.of_integer(7)])
+      ])
+      result = invoke("toObject", pairs)
+      expect(result.object?).to be true
+      expect(result.get("name")).to eq(dv.of_string("Ada"))
+      expect(result.get("role")).to eq(dv.of_string("admin"))
+      expect(result.get("level")).to eq(dv.of_integer(7))
+    end
+
+    it "builds an object from {key, value} objects" do
+      entries = dv.of_array([
+        dv.of_object({ "key" => dv.of_string("a"), "value" => dv.of_integer(1) }),
+        dv.of_object({ "key" => dv.of_string("b"), "value" => dv.of_integer(2) })
+      ])
+      result = invoke("toObject", entries)
+      expect(result.get("a")).to eq(dv.of_integer(1))
+      expect(result.get("b")).to eq(dv.of_integer(2))
+    end
+
+    it "passes through an existing object" do
+      obj = dv.of_object({ "x" => dv.of_integer(1) })
+      expect(invoke("toObject", obj)).to eq(obj)
+    end
+
+    it "uses index keys for non-pair arrays" do
+      arr = dv.of_array([dv.of_string("a"), dv.of_string("b")])
+      result = invoke("toObject", arr)
+      expect(result.get("0")).to eq(dv.of_string("a"))
+      expect(result.get("1")).to eq(dv.of_string("b"))
+    end
+
+    it "returns an empty object for null" do
+      result = invoke("toObject", dv.of_null)
+      expect(result.object?).to be true
+      expect(result.value).to eq({})
+    end
+  end
 end
