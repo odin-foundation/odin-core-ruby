@@ -95,8 +95,8 @@ module Odin
       Transform::TransformParser.new.parse(text)
     end
 
-    def execute_transform(transform_def, source)
-      Transform::TransformEngine.new.execute(transform_def, source)
+    def execute_transform(transform_def, source, import_resolver: nil)
+      Transform::TransformEngine.new.execute(transform_def, source, import_resolver: import_resolver)
     end
 
     def transform(transform_text, source)

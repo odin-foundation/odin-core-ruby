@@ -58,15 +58,16 @@ module Odin
 
     # Transform definition — top-level AST node
     class TransformDef
-      attr_reader :header, :segments, :constants, :tables, :accumulators, :passes
+      attr_reader :header, :segments, :constants, :tables, :accumulators, :passes, :imports
 
-      def initialize(header:, segments: [], constants: {}, tables: {}, accumulators: {}, passes: [])
+      def initialize(header:, segments: [], constants: {}, tables: {}, accumulators: {}, passes: [], imports: [])
         @header = header
         @segments = segments
         @constants = constants
         @tables = tables
         @accumulators = accumulators
         @passes = passes
+        @imports = imports
       end
 
       def direction

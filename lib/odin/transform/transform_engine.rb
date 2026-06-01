@@ -8,11 +8,38 @@ module Odin
 
       class TransformError < StandardError
         attr_reader :code
-        attr_accessor :segment
+        attr_accessor :segment, :field
 
         def initialize(message, code: "E001")
           @code = code
           super(message)
+        end
+      end
+
+      # A warning carrying a stable transform error code. Collected alongside
+      # string warnings; consumers that inspect codes read `.code`.
+      class TransformWarning
+        attr_reader :code, :message
+        attr_accessor :segment, :field
+
+        def initialize(message, code:)
+          @message = message
+          @code = code
+        end
+
+        def to_s
+          @message
+        end
+      end
+
+      # Raised during expression evaluation to carry a coded TransformError up to
+      # the mapping handler, which preserves the code under fail/warn.
+      class CodedTransformError < StandardError
+        attr_reader :transform_error
+
+        def initialize(transform_error)
+          @transform_error = transform_error
+          super(transform_error.message)
         end
       end
 
@@ -63,13 +90,56 @@ module Odin
         )
       end
 
+      # Create a T001 Unknown Verb error.
+      def self.unknown_verb_error(verb_name)
+        TransformError.new("Unknown verb: #{verb_name}", code: ErrorCodes::T001_UNKNOWN_VERB)
+      end
+
+      # Create a T003 Lookup Table Not Found error.
+      def self.lookup_table_not_found_error(table_name)
+        TransformError.new("Lookup table not found: #{table_name}", code: ErrorCodes::T003_LOOKUP_TABLE_NOT_FOUND)
+      end
+
+      # Create a T004 Lookup Key Not Found error.
+      def self.lookup_key_not_found_error(table_name, key)
+        TransformError.new("Lookup key '#{key}' not found in table '#{table_name}'", code: ErrorCodes::T004_LOOKUP_KEY_NOT_FOUND)
+      end
+
+      # Create a T005 Source Path Not Found error.
+      def self.source_path_not_found_error(path)
+        TransformError.new("Source path not found: #{path}", code: ErrorCodes::T005_SOURCE_PATH_NOT_FOUND)
+      end
+
+      # Create a T006 Invalid Output Format error.
+      def self.invalid_output_format_error(format)
+        TransformError.new("Invalid or unsupported output format: #{format}", code: ErrorCodes::T006_INVALID_OUTPUT_FORMAT)
+      end
+
+      # Create a T008 Accumulator Overflow error.
+      def self.accumulator_overflow_error(name, value)
+        TransformError.new("Accumulator '#{name}' overflow with value #{value}", code: ErrorCodes::T008_ACCUMULATOR_OVERFLOW)
+      end
+
+      # Create a T009 Loop Source Not Array error.
+      def self.loop_source_not_array_error(path)
+        TransformError.new("Loop source path '#{path}' does not resolve to an array", code: ErrorCodes::T009_LOOP_SOURCE_NOT_ARRAY)
+      end
+
+      # The required-source-missing code: a present-but-null :required field.
+      SOURCE_MISSING = "SOURCE_MISSING"
+
       attr_reader :verb_registry
 
       def initialize
         @verb_registry = build_verb_registry
       end
 
-      def execute(transform_def, source_data)
+      def execute(transform_def, source_data, import_resolver: nil)
+        # Merge imported tables, constants, accumulators, and segments.
+        if import_resolver && transform_def.imports && !transform_def.imports.empty?
+          resolve_imports(transform_def, import_resolver)
+        end
+
         # Check for multi-record mode (discriminator dispatch)
         disc_config = transform_def.discriminator_config
         if disc_config
@@ -290,7 +360,7 @@ module Odin
       # Public for unit testing verbs directly
       def invoke_verb(name, args, context)
         verb_fn = @verb_registry[name]
-        raise TransformError.new("Unknown verb: %#{name}") unless verb_fn
+        raise CodedTransformError.new(self.class.unknown_verb_error(name)) unless verb_fn
 
         verb_fn.call(args, context)
       end
@@ -326,6 +396,39 @@ module Odin
       end
 
       private
+
+      # Merge imported lookup tables, constants, accumulators, and named segments
+      # into this transform. Local declarations win over imported ones; imported
+      # segments are appended so their mappings remain referenceable.
+      def resolve_imports(transform_def, resolver)
+        seen = {}
+        transform_def.imports.each do |path|
+          next if seen[path]
+
+          seen[path] = true
+          text = resolver.call(path)
+          next if text.nil?
+
+          imported = TransformParser.new.parse(text)
+
+          imported.tables.each do |name, table|
+            transform_def.tables[name] = table unless transform_def.tables.key?(name)
+          end
+          imported.constants.each do |name, value|
+            transform_def.constants[name] = value unless transform_def.constants.key?(name)
+          end
+          imported.accumulators.each do |name, acc_def|
+            transform_def.accumulators[name] = acc_def unless transform_def.accumulators.key?(name)
+          end
+
+          existing_names = transform_def.segments.map(&:name)
+          imported.segments.each do |seg|
+            next if seg.name.to_s.empty? || existing_names.include?(seg.name)
+
+            transform_def.segments << seg
+          end
+        end
+      end
 
       # Emulate JavaScript's signed 32-bit right shift (>>).
       # Ruby integers are arbitrary precision and always do logical (unsigned) shift,
@@ -478,6 +581,8 @@ module Odin
         context.on_validation = ov if ov && !ov.empty?
         om = transform_def.header.target_options["onMissing"]
         context.on_missing = om if om && !om.empty?
+        oe = transform_def.header.target_options["onError"]
+        context.on_error = oe if oe && !oe.empty?
 
         # Initialize constants
         transform_def.constants.each do |key, val|
@@ -497,16 +602,31 @@ module Odin
         context
       end
 
-      # Report a lookup miss honoring the on_missing policy.
+      # Report a missing lookup key (T004) honoring the on_missing policy.
       # Defaults to silent null; raises only when on_missing is fail/warn.
       def report_lookup_miss(context, table_name, key)
         case context.on_missing
         when "fail"
-          context.errors << TransformError.new(
-            "Lookup key not found in table '#{table_name}': #{key}", code: "T011"
-          )
+          context.errors << self.class.lookup_key_not_found_error(table_name, key)
         when "warn"
-          context.warnings << "Lookup key not found in table '#{table_name}': #{key}"
+          context.warnings << TransformWarning.new(
+            "Lookup key '#{key}' not found in table '#{table_name}'",
+            code: ErrorCodes::T004_LOOKUP_KEY_NOT_FOUND
+          )
+        end
+      end
+
+      # Report a missing lookup table (T003) honoring the on_missing policy.
+      # Distinct from a missing key (T004): the referenced table was never declared.
+      def report_table_not_found(context, table_name)
+        case context.on_missing
+        when "fail"
+          context.errors << self.class.lookup_table_not_found_error(table_name)
+        when "warn"
+          context.warnings << TransformWarning.new(
+            "Lookup table not found: #{table_name}",
+            code: ErrorCodes::T003_LOOKUP_TABLE_NOT_FOUND
+          )
         end
       end
 
@@ -656,7 +776,20 @@ module Odin
         if (segment.loops && !segment.loops.empty?) || segment.each_source
           loops = segment_loops(segment)
           dummy = []
-          iterate_loops(loops, 0, segment, source, context, dummy, on_item: render)
+          begin
+            iterate_loops(loops, 0, segment, source, context, dummy, on_item: render)
+          rescue CodedTransformError => e
+            coded = e.transform_error
+            coded.segment = segment.name
+            case context.on_error
+            when "warn"
+              context.warnings << TransformWarning.new(coded.message, code: coded.code).tap { |w| w.segment = segment.name }
+            when "skip"
+              # drop silently
+            else
+              context.errors << coded
+            end
+          end
         else
           render.call(context)
         end
@@ -731,7 +864,21 @@ module Odin
       def process_loop_segment(segment, source, context, output, modifier_prefix: "")
         loops = segment_loops(segment)
         results = []
-        iterate_loops(loops, 0, segment, source, context, results, modifier_prefix: modifier_prefix)
+        begin
+          iterate_loops(loops, 0, segment, source, context, results, modifier_prefix: modifier_prefix)
+        rescue CodedTransformError => e
+          coded = e.transform_error
+          coded.segment = segment.name
+          case context.on_error
+          when "warn"
+            context.warnings << TransformWarning.new(coded.message, code: coded.code).tap { |w| w.segment = segment.name }
+          when "skip"
+            # drop silently
+          else
+            context.errors << coded
+          end
+          return
+        end
 
         return if sink_segment?(segment)
 
@@ -761,7 +908,14 @@ module Odin
         is_innermost = depth == loops.length - 1
 
         items = resolve_loop_items(spec[:source], is_outermost, source, context)
-        return unless items.is_a?(Types::DynValue) && items.array?
+        unless items.is_a?(Types::DynValue) && items.array?
+          # A present non-array scalar is a T009 error; an absent/null source
+          # yields zero rows silently.
+          if items.is_a?(Types::DynValue) && !items.null?
+            raise CodedTransformError.new(self.class.loop_source_not_array_error(spec[:source].to_s))
+          end
+          return
+        end
 
         has_underscore_only = segment.field_mappings.all? { |m| m.target_field == "_" } &&
                               segment.field_mappings.any? && segment.children.empty?
@@ -929,6 +1083,35 @@ module Odin
             val = Types::DynValue.of_array([val.is_a?(Types::DynValue) ? val : Types::DynValue.from_ruby(val)])
           end
 
+          # Missing source path: a :required field always fails (T005); an ordinary
+          # field honors the onMissing policy (fail -> T005, warn -> warning,
+          # skip/default -> keep null). A path that is merely null is not "missing".
+          required = mapping.modifiers.include?(FieldModifier::REQUIRED)
+          val_null = val.is_a?(Types::DynValue) && val.null?
+          if val_null && copy_source_absent?(mapping, source, context)
+            raw_path = mapping.expression.is_a?(CopyExpr) ? mapping.expression.source_path : target
+            path = raw_path.to_s.start_with?(".") ? raw_path[1..] : raw_path.to_s
+            if required
+              context.errors << self.class.source_path_not_found_error(path)
+              return
+            end
+            case context.on_missing
+            when "fail"
+              context.errors << self.class.source_path_not_found_error(path)
+              return
+            when "warn"
+              context.warnings << TransformWarning.new(
+                "Source path not found: #{path}", code: ErrorCodes::T005_SOURCE_PATH_NOT_FOUND
+              )
+            end
+          elsif required && val_null
+            # Required field present but explicitly null.
+            context.errors << TransformError.new(
+              "Required field '#{target}' is missing or null", code: SOURCE_MISSING
+            )
+            return
+          end
+
           # Track field modifiers with full path
           unless mapping.modifiers.empty?
             full_path = modifier_prefix.empty? ? target : "#{modifier_prefix}.#{target}"
@@ -938,9 +1121,87 @@ module Odin
           # Store DynValue directly to preserve type information (date, timestamp, etc.)
           dv_val = val.is_a?(Types::DynValue) ? val : Types::DynValue.from_ruby(val)
           set_path(output, target, dv_val)
+        rescue CodedTransformError => e
+          # Coded errors carry a stable T-code; preserve it under fail/warn.
+          coded = e.transform_error
+          coded.field = target
+          case context.on_error
+          when "warn"
+            context.warnings << TransformWarning.new(coded.message, code: coded.code).tap { |w| w.field = target }
+          when "skip"
+            # drop silently
+          else
+            context.errors << coded
+          end
         rescue StandardError => e
-          context.errors << TransformError.new(e.message)
+          case context.on_error
+          when "warn"
+            context.warnings << e.message
+          when "skip"
+            # drop silently
+          else
+            context.errors << TransformError.new(e.message)
+          end
         end
+      end
+
+      # Whether a mapping copies a source path that is absent (undefined) — distinct
+      # from a path present with a null value. Only plain copy expressions qualify;
+      # verbs, literals, objects, and special paths are never "missing source".
+      def copy_source_absent?(mapping, source, context)
+        expr = mapping.expression
+        return false unless expr.is_a?(CopyExpr)
+        # A :default / :object modifier supplies its own fallback.
+        return false if mapping.directives.any? { |d| %w[default object].include?(d.name) }
+
+        path = expr.source_path.to_s
+        return false if path.empty? || path.start_with?("$") || path == "_index"
+        return false if context.loop_vars.key?(path)
+
+        base = source.is_a?(Types::DynValue) ? source : context.source
+        if path.start_with?(".")
+          base = context.current_item if context.in_loop? && context.current_item
+          target_path = path[1..]
+        else
+          first = path.split(".").first
+          if context.aliases.key?(first)
+            base = context.aliases[first]
+            target_path = path.include?(".") ? path[(first.length + 1)..] : ""
+          else
+            target_path = path
+          end
+        end
+
+        resolved = target_path.to_s.empty? ? base : resolve_dotted_path(base, target_path)
+        # resolve_dotted_path collapses both absent and explicit-null to of_null; an
+        # absent path is one whose leaf key is not explicitly present.
+        return false unless resolved.is_a?(Types::DynValue) && resolved.null?
+
+        !path_present?(base, target_path)
+      end
+
+      # True when target_path resolves to an explicitly-present key (even if its
+      # value is null); false when any segment along the path is missing.
+      def path_present?(base, target_path)
+        return true if target_path.to_s.empty?
+        return false unless base.is_a?(Types::DynValue)
+
+        segments = parse_path_segments(target_path)
+        current = base
+        segments.each do |seg|
+          return false unless current.is_a?(Types::DynValue)
+
+          if seg.is_a?(Integer)
+            return false unless current.array? && seg < current.value.length
+
+            current = current.get_index(seg)
+          else
+            return false unless current.object? && current.value.key?(seg)
+
+            current = current.get(seg)
+          end
+        end
+        true
       end
 
       # ── Path Assignment (nested object creation for dotted paths) ──
@@ -1316,15 +1577,35 @@ module Odin
           return increment
         end
 
-        # Numeric accumulation
-        new_val = Types::DynValue.of_float(current.to_number + increment.to_number)
-        # Preserve integer type if both are integers
-        if current.integer? && increment.integer?
-          new_val = Types::DynValue.of_integer(current.to_number + increment.to_number)
+        sum = current.to_number + increment.to_number
+
+        # T008: the result exceeds representable numeric capacity (non-finite, or
+        # an integer accumulator beyond the safe-integer magnitude where precision
+        # is lost). Retain the last valid value.
+        if accumulator_overflow?(current, sum)
+          context.errors << self.class.accumulator_overflow_error(name, sum)
+          return current
         end
+
+        # Preserve integer type if both are integers
+        new_val = if current.integer? && increment.integer?
+                    Types::DynValue.of_integer(sum)
+                  else
+                    Types::DynValue.of_float(sum.to_f)
+                  end
 
         context.set_accumulator(name, new_val)
         new_val
+      end
+
+      # The largest integer that survives a double round-trip (2^53 - 1).
+      MAX_SAFE_INTEGER = 9_007_199_254_740_991
+
+      def accumulator_overflow?(current, sum)
+        f = sum.to_f
+        return true if f.nan? || f.infinite?
+
+        current.integer? && sum.abs > MAX_SAFE_INTEGER
       end
 
       def handle_set(raw_args, evaluated_args, context)
@@ -1919,9 +2200,18 @@ module Odin
 
       # ── Format Output ──
 
+      # Output formats with a registered formatter. An unrecognized format raises
+      # T006 rather than silently defaulting to JSON.
+      KNOWN_OUTPUT_FORMATS = %w[json odin xml csv fixed-width flat properties].freeze
+
       def format_output(output_dv, transform_def, context = nil)
         target_format = transform_def.target_format
         return nil unless target_format
+
+        unless KNOWN_OUTPUT_FORMATS.include?(target_format)
+          context.errors << self.class.invalid_output_format_error(target_format) if context
+          return ""
+        end
 
         case target_format
         when "json"
@@ -2448,13 +2738,19 @@ module Odin
             ctx.set_accumulator(name, increment)
             increment
           else
-            new_val = if current.integer? && increment.integer?
-                        Types::DynValue.of_integer(current.to_number + increment.to_number)
-                      else
-                        Types::DynValue.of_float(current.to_number.to_f + increment.to_number.to_f)
-                      end
-            ctx.set_accumulator(name, new_val)
-            new_val
+            sum = current.to_number + increment.to_number
+            if accumulator_overflow?(current, sum)
+              ctx.errors << self.class.accumulator_overflow_error(name, sum)
+              current
+            else
+              new_val = if current.integer? && increment.integer?
+                          Types::DynValue.of_integer(sum)
+                        else
+                          Types::DynValue.of_float(sum.to_f)
+                        end
+              ctx.set_accumulator(name, new_val)
+              new_val
+            end
           end
         }
 
@@ -2492,7 +2788,7 @@ module Odin
 
           table = ctx.get_table(table_name)
           unless table
-            report_lookup_miss(ctx, table_name, match_key)
+            report_table_not_found(ctx, table_name)
             return Types::DynValue.of_null
           end
 

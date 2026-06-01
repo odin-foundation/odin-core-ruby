@@ -829,11 +829,13 @@ RSpec.describe Odin::Transform::TransformEngine do
   # ── Error Handling ──
 
   describe "error handling" do
-    it "returns null for unknown verb" do
+    it "raises a coded T001 for an unknown verb" do
       ctx = Odin::Transform::VerbContext.new
       expect {
         engine.invoke_verb("nonExistentVerb", [], ctx)
-      }.to raise_error(Odin::Transform::TransformEngine::TransformError)
+      }.to raise_error(Odin::Transform::TransformEngine::CodedTransformError) { |e|
+        expect(e.transform_error.code).to eq("T001")
+      }
     end
   end
 
@@ -1526,8 +1528,8 @@ RSpec.describe Odin::Transform::TransformEngine do
       expect(result.errors).to be_empty
     end
 
-    # edge: a non-array outermost source produces an empty result, not an error
-    it "produces an empty array when the outermost source is not an array" do
+    # edge: a present non-array outermost source raises T009
+    it "raises T009 when the outermost source is a present non-array scalar" do
       text = loop_header(<<~SEG)
         {rows[]}
         :loop vehicles :as veh
@@ -1535,8 +1537,7 @@ RSpec.describe Odin::Transform::TransformEngine do
         vin = "@veh.vin"
       SEG
       result = execute_transform(text, { "vehicles" => "not-an-array" })
-      expect(result.output["rows"]).to eq([])
-      expect(result.errors).to be_empty
+      expect(result.errors.first&.code).to eq("T009")
     end
   end
 

@@ -20,7 +20,8 @@ module Odin
                     :warnings,        # Array<String> — collected warnings
                     :source_format,   # String — source format for directive handling
                     :on_validation,   # String — validation policy (fail / warn / skip)
-                    :on_missing       # String — missing-data policy (fail / warn / skip / default)
+                    :on_missing,      # String — missing-data policy (fail / warn / skip / default)
+                    :on_error         # String — error policy (fail / warn / skip)
 
       MAX_LOOP_DEPTH = 10
 
@@ -43,6 +44,7 @@ module Odin
         @source_format = ""
         @on_validation = nil
         @on_missing = nil
+        @on_error = nil
       end
 
       def next_sequence(name)
@@ -93,6 +95,7 @@ module Odin
         ctx.source_format = @source_format
         ctx.on_validation = @on_validation
         ctx.on_missing = @on_missing
+        ctx.on_error = @on_error
         ctx
       end
     end

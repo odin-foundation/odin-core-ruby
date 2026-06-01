@@ -158,6 +158,7 @@ module Odin
         source_section_fields = {} # {$source} section fields
         target_section_fields = {} # {$target} section fields
         target_namespaces = {} # {$target.namespace} prefix -> URI (insertion order)
+        imports = [] # @import paths, in order
 
         li = 0
         while li < lines.length
@@ -196,6 +197,14 @@ module Odin
           # Skip empty lines and comments
           next if stripped.empty?
           next if stripped.start_with?(";")
+
+          # Import directive: @import <path>
+          if stripped.start_with?("@import")
+            path = stripped.sub(/\A@import\s+/, "").strip
+            path = unquote(path) || path
+            imports << path unless path.empty?
+            next
+          end
 
           # Section header: {SectionName}
           if stripped =~ /\A\{(.*)\}\s*\z/
@@ -352,7 +361,8 @@ module Odin
           constants: constants,
           tables: tables,
           accumulators: accumulators,
-          passes: passes
+          passes: passes,
+          imports: imports
         )
       end
 
