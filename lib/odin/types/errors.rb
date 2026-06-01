@@ -56,6 +56,10 @@ module Odin
       UNKNOWN_FIELD                    = -"V011"
       CIRCULAR_REFERENCE               = -"V012"
       UNRESOLVED_REFERENCE             = -"V013"
+      UNSAFE_REGEX_PATTERN             = -"V014"
+      INVALID_REGEX_PATTERN            = -"V015"
+      PATTERN_VALIDATION_TIMEOUT       = -"V016"
+      SCHEMA_DEFINITION_INVALID        = -"V017"
 
       ALL = {
         "V001" => "Required field missing",
@@ -70,7 +74,11 @@ module Odin
         "V010" => "Conditional requirement not met",
         "V011" => "Unknown field",
         "V012" => "Circular reference",
-        "V013" => "Unresolved reference"
+        "V013" => "Unresolved reference",
+        "V014" => "Unsafe regex pattern",
+        "V015" => "Invalid regex pattern",
+        "V016" => "Pattern validation timeout",
+        "V017" => "Schema definition invalid"
       }.freeze
 
       def self.message(code)

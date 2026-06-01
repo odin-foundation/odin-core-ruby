@@ -59,6 +59,9 @@ module Odin
         # V013: Unresolved references
         check_unresolved_references
 
+        # V017: Schema-definition well-formedness
+        check_schema_definition
+
         Errors::ValidationResult.new(@errors)
       end
 
@@ -631,163 +634,43 @@ module Odin
         end
       end
 
-      # Operand keywords in invariant expressions that are not field references.
-      INVARIANT_KEYWORDS = Set.new(%w[true false]).freeze
-
+      # Evaluate an invariant over its full expression grammar.
+      #
+      # A null operand makes the expression false (V008). Absent operands make the
+      # invariant inapplicable. A malformed expression is reported as V008.
       def evaluate_invariant(scope, invariant)
         expr = invariant.expression.strip
 
-        # Spec: any present-but-null operand makes the invariant evaluate to false.
-        if invariant_has_null_operand?(scope, expr)
+        resolver = lambda do |name|
+          path = scope.empty? ? name : "#{scope}.#{name}"
+          @doc.get(path)
+        end
+
+        begin
+          result = InvariantEvaluator.new(resolver).evaluate(expr)
+        rescue InvariantEvaluator::ParseError
           add_error(
             code: Errors::ValidationErrorCode::INVARIANT_VIOLATION,
             path: scope,
-            message: "Invariant '#{expr}' violated at '#{scope}'",
-            expected: expr,
-            actual: "null operand"
+            message: "Invalid invariant expression: #{expr} at '#{scope}'",
+            expected: "#{expr} to be valid",
+            actual: "parse error"
           )
           return
         end
 
-        # Arithmetic equality: field = a OP b (e.g. "total = subtotal + tax")
-        arith = expr.match(%r{\A(\w+)\s*=\s*(\w+)\s*([+\-*/])\s*(\w+)\z})
-        if arith
-          evaluate_arithmetic_invariant(scope, expr, arith)
-          return
-        end
+        # Absent operands: invariant does not apply.
+        return if result.value.nil? && !result.null_operand
 
-        # Parse simple binary expressions: field OPERATOR value_or_field
-        match = expr.match(/\A(\S+)\s*(>=|<=|!=|==|>|<|=)\s*(.+)\z/)
-        return unless match
+        return unless result.value == false
 
-        left_field = match[1]
-        operator = match[2]
-        right_expr = match[3].strip
-
-        left_path = scope.empty? ? left_field : "#{scope}.#{left_field}"
-        left_value = @doc.get(left_path)
-        return unless left_value # Can't evaluate if field missing
-
-        # Right side might be a field reference or a literal
-        right_path = scope.empty? ? right_expr : "#{scope}.#{right_expr}"
-        right_value = @doc.get(right_path)
-
-        if right_value
-          # Compare two field values
-          result = compare_values(left_value, operator, right_value)
-        else
-          # Compare field to literal
-          result = compare_value_to_literal(left_value, operator, right_expr)
-        end
-
-        unless result
-          add_error(
-            code: Errors::ValidationErrorCode::INVARIANT_VIOLATION,
-            path: scope,
-            message: "Invariant '#{expr}' violated at '#{scope}'",
-            expected: expr
-          )
-        end
-      end
-
-      # True when any field operand referenced by the expression is present with a
-      # null value. Absent operands are not treated as null (handled by V001).
-      def invariant_has_null_operand?(scope, expr)
-        expr.scan(/[A-Za-z_][A-Za-z0-9_.]*/).any? do |token|
-          next false if INVARIANT_KEYWORDS.include?(token)
-
-          path = scope.empty? ? token : "#{scope}.#{token}"
-          value = @doc.get(path)
-          !value.nil? && value.null?
-        end
-      end
-
-      # Evaluate "field = a OP b" arithmetic; flag V008 on inconsistency.
-      def evaluate_arithmetic_invariant(scope, expr, match)
-        lhs = resolve_invariant_number(scope, match[1])
-        a = resolve_invariant_number(scope, match[2])
-        b = resolve_invariant_number(scope, match[4])
-        return if lhs.nil? || a.nil? || b.nil? # operands missing, invariant doesn't apply
-
-        rhs = case match[3]
-              when "+" then a + b
-              when "-" then a - b
-              when "*" then a * b
-              when "/" then b.zero? ? Float::NAN : a / b
-              end
-        return if rhs.nil?
-
-        if (lhs - rhs).abs > 0.001
-          add_error(
-            code: Errors::ValidationErrorCode::INVARIANT_VIOLATION,
-            path: scope,
-            message: "Invariant '#{expr}' violated at '#{scope}'",
-            expected: expr,
-            actual: "false"
-          )
-        end
-      end
-
-      # Resolve a field name or numeric literal to a Float for arithmetic invariants.
-      def resolve_invariant_number(scope, token)
-        path = scope.empty? ? token : "#{scope}.#{token}"
-        value = @doc.get(path)
-        if value
-          return extract_numeric_value(value)
-        end
-
-        Float(token)
-      rescue ArgumentError, TypeError
-        nil
-      end
-
-      def compare_values(left, operator, right)
-        lv = extract_numeric_value(left)
-        rv = extract_numeric_value(right)
-
-        if lv && rv
-          case operator
-          when ">", ">"  then lv > rv
-          when "<"       then lv < rv
-          when ">=", ">=" then lv >= rv
-          when "<=", "<=" then lv <= rv
-          when "=", "==" then lv == rv
-          when "!="      then lv != rv
-          else false
-          end
-        else
-          ls = extract_value_for_comparison(left)
-          rs = extract_value_for_comparison(right)
-          case operator
-          when "=", "==" then ls == rs
-          when "!="      then ls != rs
-          else false
-          end
-        end
-      end
-
-      def compare_value_to_literal(value, operator, literal)
-        nv = extract_numeric_value(value)
-        nl = Float(literal) rescue nil
-
-        if nv && nl
-          case operator
-          when ">"       then nv > nl
-          when "<"       then nv < nl
-          when ">=", ">=" then nv >= nl
-          when "<=", "<=" then nv <= nl
-          when "=", "==" then nv == nl
-          when "!="      then nv != nl
-          else false
-          end
-        else
-          vs = extract_value_for_comparison(value)
-          case operator
-          when "=", "==" then vs == literal
-          when "!="      then vs != literal
-          else false
-          end
-        end
+        add_error(
+          code: Errors::ValidationErrorCode::INVARIANT_VIOLATION,
+          path: scope,
+          message: "Invariant '#{expr}' violated at '#{scope}'",
+          expected: expr,
+          actual: result.null_operand ? "null operand" : "false"
+        )
       end
 
       # ── V009: Cardinality constraint violation ──
@@ -1084,6 +967,12 @@ module Odin
         return false unless ref_path.include?("*")
         pattern = Regexp.new("\\A#{ref_path.gsub('*', '.*')}\\z")
         @doc.paths.any? { |p| pattern.match?(p) }
+      end
+
+      # ── V017: Schema-definition well-formedness ──
+
+      def check_schema_definition
+        @errors.concat(SchemaDefinitionValidator.new(@schema, @registry).validate)
       end
 
       # ── Helpers ──

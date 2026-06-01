@@ -164,9 +164,14 @@ module Odin
           @previous_header_type = type_name
           @previous_header_path = ""
           @types[type_name] ||= Types::SchemaType.new(name: type_name, fields: {})
-        elsif content.end_with?("[]")
-          # Array definition
-          array_path = content[0...-2]
+        elsif (array_match = content.match(/\A(.+?)\[\]\s*(?::\s*(.+))?\z/))
+          # Array definition, optionally tabular: name[] : col1, col2
+          array_path = array_match[1].strip
+          columns = nil
+          if array_match[2]
+            columns = parse_field_list(array_match[2])
+            columns = nil if columns.empty?
+          end
           @current_header = array_path
           @current_header_kind = :array
           @current_type_name = nil
@@ -187,7 +192,8 @@ module Odin
             item_fields: {},
             min_items: min_items,
             max_items: max_items,
-            unique: unique
+            unique: unique,
+            columns: columns
           )
         else
           # Regular object header
@@ -758,9 +764,10 @@ module Odin
           return [Types::SchemaFieldType::INTEGER, text[2..].to_s.strip, nil, nil]
         elsif text.start_with?("#" + "$")
           rest = text[2..].to_s.strip
-          if rest.start_with?(".") && rest.length > 1 && rest[1]&.match?(/\d/)
-            return [Types::SchemaFieldType::CURRENCY, rest[2..].to_s.strip, nil, nil]
-          end
+          # Decimal places spec (#$.N); bare #$ defaults to 2 places
+          dp_match = rest.match(/\A\.(\d+)/)
+          places, rest = dp_match ? [dp_match[1], rest[dp_match[0].length..].to_s.strip] : ["2", rest]
+          rest = rest.empty? ? ":dp#{places}" : ":dp#{places} #{rest}"
           return [Types::SchemaFieldType::CURRENCY, rest, nil, nil]
         elsif text.start_with?("#" + "%")
           return [Types::SchemaFieldType::PERCENT, text[2..].to_s.strip, nil, nil]

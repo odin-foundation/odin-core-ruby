@@ -44,7 +44,7 @@ RSpec.describe "Odin::Errors" do
   end
 
   describe Odin::Errors::ValidationErrorCode do
-    it "defines V001 through V013" do
+    it "defines V001 through V017" do
       expect(described_class::REQUIRED_FIELD_MISSING).to eq("V001")
       expect(described_class::TYPE_MISMATCH).to eq("V002")
       expect(described_class::VALUE_OUT_OF_BOUNDS).to eq("V003")
@@ -58,10 +58,14 @@ RSpec.describe "Odin::Errors" do
       expect(described_class::UNKNOWN_FIELD).to eq("V011")
       expect(described_class::CIRCULAR_REFERENCE).to eq("V012")
       expect(described_class::UNRESOLVED_REFERENCE).to eq("V013")
+      expect(described_class::UNSAFE_REGEX_PATTERN).to eq("V014")
+      expect(described_class::INVALID_REGEX_PATTERN).to eq("V015")
+      expect(described_class::PATTERN_VALIDATION_TIMEOUT).to eq("V016")
+      expect(described_class::SCHEMA_DEFINITION_INVALID).to eq("V017")
     end
 
-    it "has 13 error codes" do
-      expect(described_class::ALL.size).to eq(13)
+    it "has 17 error codes" do
+      expect(described_class::ALL.size).to eq(17)
     end
 
     it "all codes have messages" do
