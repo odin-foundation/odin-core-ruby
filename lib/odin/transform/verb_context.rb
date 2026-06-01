@@ -8,6 +8,7 @@ module Odin
                     :loop_index,      # Integer — current loop iteration (0-based)
                     :loop_length,     # Integer — total loop length
                     :loop_vars,       # Hash<String, DynValue> — named loop variables
+                    :aliases,         # Hash<String, DynValue> — :loop :as alias bindings
                     :accumulators,    # Hash<String, DynValue> — accumulator state
                     :tables,          # Hash<String, LookupTable> — lookup tables
                     :constants,       # Hash<String, DynValue> — constant values
@@ -29,6 +30,7 @@ module Odin
         @loop_index = 0
         @loop_length = 0
         @loop_vars = {}
+        @aliases = {}
         @accumulators = {}
         @tables = {}
         @constants = {}
@@ -78,6 +80,7 @@ module Odin
         ctx = VerbContext.new
         ctx.source = @source
         ctx.loop_vars = @loop_vars.dup
+        ctx.aliases = @aliases.dup
         ctx.accumulators = @accumulators # shared reference
         ctx.tables = @tables
         ctx.constants = @constants

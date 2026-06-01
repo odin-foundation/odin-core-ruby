@@ -175,6 +175,46 @@ RSpec.describe Odin::Parsing::OdinParser do
     end
   end
 
+  # ──── Multiline Strings ────
+
+  describe "triple-quoted multiline strings" do
+    # happy: content spans newlines verbatim until the closing """
+    it "captures content spanning newlines" do
+      doc = parse("field = \"\"\"hello\nworld\"\"\"")
+      expect(doc.get("field").value).to eq("hello\nworld")
+      expect(doc.get("field").type).to eq(:string)
+    end
+
+    it "captures a single-line triple-quoted string" do
+      doc = parse('field = """one line"""')
+      expect(doc.get("field").value).to eq("one line")
+    end
+
+    # edge: leading and trailing newlines are retained verbatim
+    it "retains leading and trailing newlines verbatim" do
+      doc = parse("field = \"\"\"\ninner\n\"\"\"")
+      expect(doc.get("field").value).to eq("\ninner\n")
+    end
+
+    # edge: empty triple-quoted string
+    it "parses an empty triple-quoted string" do
+      doc = parse('field = """"""')
+      expect(doc.get("field").value).to eq("")
+    end
+
+    # edge: backslashes and embedded quotes are kept verbatim (no escapes)
+    it "keeps backslashes and embedded quotes verbatim" do
+      doc = parse('field = """C:\path say "hi" done"""')
+      expect(doc.get("field").value).to eq('C:\path say "hi" done')
+    end
+
+    # error: an unterminated triple-quoted block raises P004
+    it "raises P004 for an unterminated multiline block" do
+      expect { parse("field = \"\"\"never closed\n") }
+        .to raise_error(Odin::Errors::ParseError) { |e| expect(e.code).to eq("P004") }
+    end
+  end
+
   # ──── Header Context ────
 
   describe "header context" do
@@ -352,6 +392,44 @@ RSpec.describe Odin::Parsing::OdinParser do
       doc = parse("{items[] : name, qty}\n\"Widget\", ##10\n{other}\nval = ##1")
       expect(doc.get("items[0].name").value).to eq("Widget")
       expect(doc.get("other.val").value).to eq(1)
+    end
+
+    # Typed cells must not drop or shift columns in any position.
+    it "keeps the trailing column when an integer cell leads the row" do
+      doc = parse("{rows[] : qty, name}\n##5, \"widget\"\n##12, \"gadget\"")
+      expect(doc.get("rows[0].qty").value).to eq(5)
+      expect(doc.get("rows[0].name").value).to eq("widget")
+      expect(doc.get("rows[1].qty").value).to eq(12)
+      expect(doc.get("rows[1].name").value).to eq("gadget")
+    end
+
+    it "keeps the sign and column of a negative integer cell" do
+      doc = parse("{temps[] : label, value}\n\"low\", ##-5\n\"high\", ##42")
+      expect(doc.get("temps[0].value").value).to eq(-5)
+      expect(doc.get("temps[1].value").value).to eq(42)
+    end
+
+    it "keeps every column when all cells are typed" do
+      doc = parse("{points[] : x, y, z}\n##1, ##2, ##3\n##-4, ##5, ##-6")
+      expect(doc.get("points[0].x").value).to eq(1)
+      expect(doc.get("points[0].y").value).to eq(2)
+      expect(doc.get("points[0].z").value).to eq(3)
+      expect(doc.get("points[1].x").value).to eq(-4)
+      expect(doc.get("points[1].z").value).to eq(-6)
+    end
+
+    it "produces an object array for a single named integer column" do
+      doc = parse("{counts[] : value}\n##42\n##0")
+      expect(doc.get("counts[0].value").value).to eq(42)
+      expect(doc.get("counts[1].value").value).to eq(0)
+    end
+
+    it "interleaves integer, string, and currency cells without shifting" do
+      doc = parse("{items[] : qty, name, price}\n##10, \"Widget\", \#$5.99\n##5, \"Gadget\", \#$12.50")
+      expect(doc.get("items[0].qty").value).to eq(10)
+      expect(doc.get("items[0].name").value).to eq("Widget")
+      expect(doc.get("items[0].price").value.to_f).to be_within(0.01).of(5.99)
+      expect(doc.get("items[1].price").value.to_f).to be_within(0.01).of(12.50)
     end
   end
 

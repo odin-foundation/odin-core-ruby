@@ -159,8 +159,39 @@ module Odin
         target_section_fields = {} # {$target} section fields
         target_namespaces = {} # {$target.namespace} prefix -> URI (insertion order)
 
-        lines.each do |line|
+        li = 0
+        while li < lines.length
+          line = lines[li]
+          li += 1
           stripped = line.strip
+
+          # A triple-quoted body under a :literal segment is captured verbatim,
+          # spanning lines until the closing """. Interior blank lines are kept.
+          if current_section_type == :segment && current_section &&
+             sections[current_section][:assignments].any? { |a| a[:key] == "_literal" } &&
+             sections[current_section][:assignments].none? { |a| a[:key] == "_literalBody" } &&
+             stripped.start_with?('"""')
+            body_lines = []
+            after = line.sub(/\A\s*"""/, "")
+            if after.end_with?('"""') && !after.strip.empty?
+              body_lines << after[0...-3]
+            else
+              body_lines << after unless after.empty?
+              loop do
+                break if li >= lines.length
+                l = lines[li]
+                li += 1
+                if l.strip == '"""' || l.rstrip.end_with?('"""')
+                  trimmed = l.rstrip.sub(/"""\z/, "")
+                  body_lines << trimmed unless trimmed.empty? && l.strip == '"""'
+                  break
+                end
+                body_lines << l
+              end
+            end
+            sections[current_section][:assignments] << { key: "_literalBody", value: body_lines.join("\n") }
+            next
+          end
 
           # Skip empty lines and comments
           next if stripped.empty?
@@ -221,6 +252,11 @@ module Odin
           # Parsed like "_<name> = \"rest\"", reusing the existing directive handling.
           if current_section_type == :segment && current_section &&
              (bare = parse_bare_directive(stripped))
+            # Repeated :loop lines stack as _loop, _loop2, _loop3, … (cross-product).
+            if bare[:key] == "_loop"
+              existing = sections[current_section][:assignments].count { |a| a[:key].to_s.match?(/\A_loop\d*\z/) }
+              bare = { key: "_loop#{existing + 1}", value: bare[:value] } if existing.positive?
+            end
             sections[current_section][:assignments] << bare
             next
           end
@@ -622,6 +658,10 @@ module Odin
         is_else = inline_is_else
         pass = nil
         counter_name = inline_counter
+        loops = []
+        loops << parse_loop_directive(inline_loop) if inline_loop
+        is_literal = false
+        literal_body = nil
 
         assignments.each do |a|
           key = a[:key]
@@ -636,8 +676,13 @@ module Odin
             discriminator_value = unquote_or_raw(raw_val)
           when "_when"
             when_condition = unquote_or_raw(raw_val)
-          when "_each", "_loop", "_from"
+          when "_each", "_from"
             each_source = unquote_or_raw(raw_val)
+            is_array = true
+          when /\A_loop\d*\z/
+            spec = parse_loop_directive(unquote_or_raw(raw_val))
+            loops << spec
+            each_source ||= spec[:source]
             is_array = true
           when "_if"
             if_condition = unquote_or_raw(raw_val)
@@ -649,6 +694,10 @@ module Odin
             pass = parse_int_literal(raw_val)
           when "_counter"
             counter_name = unquote_or_raw(raw_val)
+          when "_literal"
+            is_literal = true
+          when "_literalBody"
+            literal_body = raw_val
           else
             next if key.start_with?("_") && key != "_"
 
@@ -671,8 +720,22 @@ module Odin
           is_else: is_else,
           pass: pass,
           counter_name: counter_name,
-          is_array: is_array
+          is_array: is_array,
+          loops: loops,
+          is_literal: is_literal,
+          literal_body: literal_body
         )
+      end
+
+      # Split a loop directive value into its source path and optional ":as" alias.
+      def parse_loop_directive(value)
+        v = value.to_s.strip
+        if v.include?(":as")
+          parts = v.split(":as", 2).map(&:strip)
+          { source: parts[0], alias: (parts[1].nil? || parts[1].empty? ? nil : parts[1]) }
+        else
+          { source: v, alias: nil }
+        end
       end
 
       # ── Field Mapping ──

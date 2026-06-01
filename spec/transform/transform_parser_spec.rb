@@ -884,4 +884,68 @@ RSpec.describe Odin::Transform::TransformParser do
       expect(seg.field_mappings.length).to eq(4)
     end
   end
+
+  # ── Nested Loop Directives ──
+
+  describe "nested :loop parsing" do
+    it "collects multiple :loop lines as an ordered loop list with aliases" do
+      text = make_transform(<<~SEG)
+        {rows[]}
+        :loop vehicles :as veh
+        :loop .coverages :as cov
+        vin = "@veh.vin"
+      SEG
+      seg = parser.parse(text).segments[0]
+      expect(seg.loops.length).to eq(2)
+      expect(seg.loops[0]).to eq({ source: "vehicles", alias: "veh" })
+      expect(seg.loops[1]).to eq({ source: ".coverages", alias: "cov" })
+    end
+
+    it "parses a three-level loop list" do
+      text = make_transform(<<~SEG)
+        {rows[]}
+        :loop regions :as r
+        :loop .stores :as s
+        :loop .items :as i
+        sku = "@i.sku"
+      SEG
+      seg = parser.parse(text).segments[0]
+      expect(seg.loops.map { |l| l[:alias] }).to eq(%w[r s i])
+    end
+
+    it "treats a single :loop without :as as one loop with a nil alias" do
+      text = make_transform(<<~SEG)
+        {rows[]}
+        :loop items
+        value = "@.x"
+      SEG
+      seg = parser.parse(text).segments[0]
+      expect(seg.loops).to eq([{ source: "items", alias: nil }])
+    end
+  end
+
+  # ── Literal Block Directives ──
+
+  describe ":literal block parsing" do
+    it "captures a single-line literal body and marks the segment" do
+      text = make_transform("{HDR}\n:literal\n\"\"\"\nHDR|${@.x}\n\"\"\"\n")
+      seg = parser.parse(text).segments[0]
+      expect(seg.is_literal).to be(true)
+      expect(seg.literal_body).to eq("HDR|${@.x}")
+    end
+
+    it "preserves interior blank lines in the captured body" do
+      text = make_transform("{B}\n:literal\n\"\"\"\nfirst\n\nlast\n\"\"\"\n")
+      seg = parser.parse(text).segments[0]
+      expect(seg.literal_body).to eq("first\n\nlast")
+    end
+
+    it "captures a literal body under a :loop directive" do
+      text = make_transform("{DET[]}\n:loop @items\n:literal\n\"\"\"\nDET|${@.sku}\n\"\"\"\n")
+      seg = parser.parse(text).segments[0]
+      expect(seg.is_literal).to be(true)
+      expect(seg.loops).to eq([{ source: "@items", alias: nil }])
+      expect(seg.literal_body).to eq("DET|${@.sku}")
+    end
+  end
 end

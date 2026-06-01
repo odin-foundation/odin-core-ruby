@@ -128,7 +128,8 @@ module Odin
                   :field_mappings, :discriminator, :discriminator_value,
                   :when_condition, :each_source, :if_condition,
                   :elif_condition, :is_else,
-                  :children, :pass, :counter_name, :is_array
+                  :children, :pass, :counter_name, :is_array,
+                  :loops, :is_literal, :literal_body
 
       def initialize(
         name:,
@@ -145,7 +146,10 @@ module Odin
         children: [],
         pass: nil,
         counter_name: nil,
-        is_array: false
+        is_array: false,
+        loops: [],
+        is_literal: false,
+        literal_body: nil
       )
         @name = name
         @path = path
@@ -162,6 +166,9 @@ module Odin
         @pass = pass
         @counter_name = counter_name
         @is_array = is_array
+        @loops = loops
+        @is_literal = is_literal
+        @literal_body = literal_body
       end
     end
 

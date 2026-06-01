@@ -188,11 +188,11 @@ RSpec.describe Odin::Parsing::Tokenizer do
       expect(str.value).to include("line2")
     end
 
-    it "multi-line preserves internal newlines" do
+    it "multi-line preserves internal newlines verbatim" do
       text = "name = \"\"\"\nfirst\nsecond\nthird\n\"\"\""
       tokens = tokenize(text)
       str = find_token(tokens, TokenType::STRING)
-      expect(str.value).to eq("first\nsecond\nthird\n")
+      expect(str.value).to eq("\nfirst\nsecond\nthird\n")
     end
 
     it "unterminated string produces ERROR" do
@@ -225,8 +225,15 @@ RSpec.describe Odin::Parsing::Tokenizer do
       expect(str.value).to eq("a/b")
     end
 
-    it "handles empty multi-line string" do
+    it "captures empty multi-line body delimiters verbatim" do
       text = "name = \"\"\"\n\"\"\""
+      tokens = tokenize(text)
+      str = find_token(tokens, TokenType::STRING)
+      expect(str.value).to eq("\n")
+    end
+
+    it "handles empty multi-line string" do
+      text = "name = \"\"\"\"\"\""
       tokens = tokenize(text)
       str = find_token(tokens, TokenType::STRING)
       expect(str.value).to eq("")
@@ -237,6 +244,18 @@ RSpec.describe Odin::Parsing::Tokenizer do
       tokens = tokenize(text)
       str = find_token(tokens, TokenType::STRING)
       expect(str.value).to include("\\n")
+    end
+
+    it "marks a multi-line string token via its raw flag" do
+      tokens = tokenize("name = \"\"\"a\nb\"\"\"")
+      str = find_token(tokens, TokenType::STRING)
+      expect(str.raw).to eq("multiline")
+    end
+
+    it "unterminated multi-line string produces ERROR" do
+      tokens = tokenize("name = \"\"\"never closed\n")
+      err = find_token(tokens, TokenType::ERROR)
+      expect(err).not_to be_nil
     end
 
     it "handles unicode capital U escape \\U00010000" do

@@ -1413,4 +1413,202 @@ RSpec.describe Odin::Transform::TransformEngine do
       expect(result.output["Receipt"]["template"]).to eq("Use ${@.field} for the value")
     end
   end
+
+  # ── Nested Loops (cross-product) ──
+
+  describe "nested :loop directives" do
+    def loop_header(body)
+      <<~ODIN
+        {$}
+        odin = "1.0.0"
+        transform = "1.0.0"
+        direction = "json->json"
+        target.format = "json"
+
+        #{body}
+      ODIN
+    end
+
+    # happy: two-level cross-product
+    it "iterates a two-level cross-product binding each :as alias" do
+      text = loop_header(<<~SEG)
+        {rows[]}
+        :loop vehicles :as veh
+        :loop .coverages :as cov
+        vin = "@veh.vin"
+        code = "@cov.code"
+      SEG
+      src = {
+        "vehicles" => [
+          { "vin" => "A", "coverages" => [{ "code" => "X" }, { "code" => "Y" }] },
+          { "vin" => "B", "coverages" => [{ "code" => "Z" }] }
+        ]
+      }
+      result = execute_transform(text, src)
+      expect(result.output["rows"]).to eq([
+        { "vin" => "A", "code" => "X" },
+        { "vin" => "A", "code" => "Y" },
+        { "vin" => "B", "code" => "Z" }
+      ])
+    end
+
+    # happy: three-level cross-product
+    it "iterates a three-level cross-product" do
+      text = loop_header(<<~SEG)
+        {rows[]}
+        :loop regions :as r
+        :loop .stores :as s
+        :loop .items :as i
+        region = "@r.name"
+        store = "@s.id"
+        sku = "@i.sku"
+      SEG
+      src = {
+        "regions" => [
+          { "name" => "West", "stores" => [{ "id" => "S1", "items" => [{ "sku" => "X" }, { "sku" => "Y" }] }] },
+          { "name" => "East", "stores" => [{ "id" => "S2", "items" => [{ "sku" => "Z" }] }] }
+        ]
+      }
+      result = execute_transform(text, src)
+      expect(result.output["rows"]).to eq([
+        { "region" => "West", "store" => "S1", "sku" => "X" },
+        { "region" => "West", "store" => "S1", "sku" => "Y" },
+        { "region" => "East", "store" => "S2", "sku" => "Z" }
+      ])
+    end
+
+    # edge: counter binds innermost index and resets per outer item
+    it "binds :counter to the innermost index and resets per outer item" do
+      text = loop_header(<<~SEG)
+        {rows[]}
+        :loop vehicles :as veh
+        :loop .coverages :as cov
+        :counter idx
+        vin = "@veh.vin"
+        code = "@cov.code"
+        cov_index = "@idx"
+      SEG
+      src = {
+        "vehicles" => [
+          { "vin" => "V1", "coverages" => [{ "code" => "A" }, { "code" => "B" }] },
+          { "vin" => "V3", "coverages" => [{ "code" => "C" }] }
+        ]
+      }
+      result = execute_transform(text, src)
+      expect(result.output["rows"]).to eq([
+        { "vin" => "V1", "code" => "A", "cov_index" => 0 },
+        { "vin" => "V1", "code" => "B", "cov_index" => 1 },
+        { "vin" => "V3", "code" => "C", "cov_index" => 0 }
+      ])
+    end
+
+    # error/edge: an outer item with a missing or non-array inner yields no rows
+    it "yields no rows for an outer item whose inner source is absent" do
+      text = loop_header(<<~SEG)
+        {rows[]}
+        :loop vehicles :as veh
+        :loop .coverages :as cov
+        vin = "@veh.vin"
+        code = "@cov.code"
+      SEG
+      src = {
+        "vehicles" => [
+          { "vin" => "V1", "coverages" => [{ "code" => "A" }] },
+          { "vin" => "V2" },
+          { "vin" => "V3", "coverages" => [{ "code" => "C" }] }
+        ]
+      }
+      result = execute_transform(text, src)
+      expect(result.output["rows"]).to eq([
+        { "vin" => "V1", "code" => "A" },
+        { "vin" => "V3", "code" => "C" }
+      ])
+      expect(result.errors).to be_empty
+    end
+
+    # edge: a non-array outermost source produces an empty result, not an error
+    it "produces an empty array when the outermost source is not an array" do
+      text = loop_header(<<~SEG)
+        {rows[]}
+        :loop vehicles :as veh
+        :loop .coverages :as cov
+        vin = "@veh.vin"
+      SEG
+      result = execute_transform(text, { "vehicles" => "not-an-array" })
+      expect(result.output["rows"]).to eq([])
+      expect(result.errors).to be_empty
+    end
+  end
+
+  # ── :literal Blocks ──
+
+  describe ":literal block segments" do
+    def fwf_literal(body)
+      <<~ODIN
+        {$}
+        odin = "1.0.0"
+        transform = "1.0.0"
+        direction = "json->fixed-width"
+        target.format = "fixed-width"
+
+        #{body}
+      ODIN
+    end
+
+    # happy: path and verb interpolation
+    it "interpolates path and verb expressions in a literal block" do
+      text = fwf_literal(<<~SEG)
+        {HDR}
+        :literal
+        """
+        HDR|${@.number}|${%upper @.code}
+        """
+      SEG
+      result = execute_transform(text, { "number" => "P-100", "code" => "abc" })
+      expect(result.formatted).to eq("HDR|P-100|ABC")
+    end
+
+    # happy: a literal block renders once per loop item
+    it "renders a literal block once per loop item" do
+      text = fwf_literal(<<~SEG)
+        {DET[]}
+        :loop @items
+        :literal
+        """
+        DET|${@.sku}|${@.qty}
+        """
+      SEG
+      src = { "items" => [{ "sku" => "A1", "qty" => "2" }, { "sku" => "B2", "qty" => "5" }] }
+      result = execute_transform(text, src)
+      expect(result.formatted).to eq("DET|A1|2\nDET|B2|5")
+    end
+
+    # edge: escapes \${ -> ${, \$ -> $, \\ -> \
+    it "applies literal-block escapes" do
+      text = fwf_literal(<<~SEG)
+        {NOTE}
+        :literal
+        """
+        NOTE|literal:\\${@.number} dollar:\\$ slash:\\\\ value:${@.number}
+        """
+      SEG
+      result = execute_transform(text, { "number" => "P-100" })
+      expect(result.formatted).to eq("NOTE|literal:${@.number} dollar:$ slash:\\ value:P-100")
+    end
+
+    # edge: interior blank lines are preserved verbatim
+    it "preserves interior blank lines in a literal body" do
+      text = fwf_literal("{B}\n:literal\n\"\"\"\nfirst\n\nlast\n\"\"\"\n")
+      result = execute_transform(text, {})
+      expect(result.formatted).to eq("first\n\nlast")
+    end
+
+    # error: nested interpolation is rejected with T014
+    it "rejects nested interpolation with a T014 error" do
+      text = fwf_literal("{X}\n:literal\n\"\"\"\nval:${@.a ${@.b}}\n\"\"\"\n")
+      result = execute_transform(text, { "a" => "1", "b" => "2" })
+      codes = result.errors.map(&:code)
+      expect(codes).to include("T014")
+    end
+  end
 end

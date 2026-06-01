@@ -472,43 +472,33 @@ module Odin
         emit(TokenType::ERROR, "Unterminated string", line, col)
       end
 
+      # Triple-quoted string. Content is captured verbatim (no escape processing,
+      # no newline trimming) and may span newlines; closes at the next """.
       def scan_multiline_string(line, col)
         s = @scanner
-        # Skip initial newline after opening """
-        if !s.eos?
-          byte = s.string.getbyte(s.pos)
-          if byte == 10
-            s.pos += 1; @line += 1; @col = 1
-          elsif byte == 13
-            s.pos += 1; @line += 1; @col = 1
-            if !s.eos? && s.string.getbyte(s.pos) == 10
-              s.pos += 1
-            end
-          end
-        end
-
         result = +""
         until s.eos?
           # Check for closing """
           if s.string.getbyte(s.pos) == 34 &&
-             s.pos + 2 < s.string.bytesize &&
              s.string.getbyte(s.pos + 1) == 34 &&
              s.string.getbyte(s.pos + 2) == 34
             s.pos += 3; @col += 3
-            emit(TokenType::STRING, result, line, col)
+            emit(TokenType::STRING, result, line, col, raw: "multiline")
             return
           end
 
           byte = s.string.getbyte(s.pos)
-          if byte == 13 # \r
+          if byte == 10 # \n
             result << "\n"
+            s.pos += 1; @line += 1; @col = 1
+          elsif byte == 13 # \r
             s.pos += 1; @line += 1; @col = 1
             if !s.eos? && s.string.getbyte(s.pos) == 10
+              result << "\n"
               s.pos += 1
+            else
+              result << "\r"
             end
-          elsif byte == 10 # \n
-            result << "\n"
-            s.pos += 1; @line += 1; @col = 1
           else
             # Scan non-special chars in bulk
             chunk = s.scan(/[^"\r\n]+/)
@@ -516,7 +506,7 @@ module Odin
               result << chunk
               @col += chunk.length
             else
-              # Single quote that isn't part of """
+              # Single/double quote that isn't part of closing """
               result << s.string[s.pos]
               s.pos += 1; @col += 1
             end

@@ -8,6 +8,7 @@ module Odin
 
       class TransformError < StandardError
         attr_reader :code
+        attr_accessor :segment
 
         def initialize(message, code: "E001")
           @code = code
@@ -31,6 +32,17 @@ module Odin
         T010_POSITION_OVERFLOW       = "T010"
         T011_INCOMPATIBLE_CONVERSION = "T011"
         T012_DANGLING_BRANCH         = "T012"
+        T014_NESTED_INTERPOLATION    = "T014"
+      end
+
+      # Create a T014 Nested Interpolation error.
+      def self.nested_interpolation_error(expr, segment = nil)
+        err = TransformError.new(
+          "Nested interpolation is not allowed: ${#{expr}}",
+          code: ErrorCodes::T014_NESTED_INTERPOLATION
+        )
+        err.segment = segment if segment
+        err
       end
 
       # Create a T012 Dangling Branch error (elif/else with no preceding if).
@@ -578,6 +590,12 @@ module Odin
         seg_name = segment.name
         full_prefix = modifier_prefix.empty? ? seg_name : "#{modifier_prefix}.#{seg_name}"
 
+        # Literal block: emit interpolated text lines instead of field mappings.
+        if segment.is_literal
+          process_literal_segment(segment, source, context, output)
+          return
+        end
+
         # Handle _each (loop over array)
         if segment.each_source
           process_loop_segment(segment, source, context, output, modifier_prefix: full_prefix)
@@ -626,78 +644,204 @@ module Odin
         end
       end
 
+      # Render a :literal segment to interpolated text lines. Under a :loop the
+      # block renders once per item; lines are emitted verbatim by the formatter.
+      def process_literal_segment(segment, source, context, output)
+        template = segment.literal_body.to_s
+        lines = []
+        render = lambda do |ctx|
+          render_literal(template, ctx, segment.path).split("\n", -1).each { |l| lines << l }
+        end
+
+        if (segment.loops && !segment.loops.empty?) || segment.each_source
+          loops = segment_loops(segment)
+          dummy = []
+          iterate_loops(loops, 0, segment, source, context, dummy, on_item: render)
+        else
+          render.call(context)
+        end
+
+        set_output_path(output, segment.name, { "__literalLines" => lines })
+      end
+
+      def render_literal(template, context, segment_path)
+        interpolate_literal_block(template, context)
+      rescue TransformError => e
+        if e.code == ErrorCodes::T014_NESTED_INTERPOLATION
+          e.segment ||= segment_path
+          context.errors << e
+          ""
+        else
+          raise
+        end
+      end
+
+      # Interpolate ${...} in a literal block body. Escapes: \${ -> ${, \$ -> $,
+      # \\ -> \. A ${...} whose expression contains another ${ is a T014 error.
+      def interpolate_literal_block(template, context)
+        out = +""
+        i = 0
+        len = template.length
+        while i < len
+          ch = template[i]
+          if ch == "\\"
+            nxt = template[i + 1]
+            if nxt == "$" && template[i + 2] == "{"
+              out << "${"; i += 3; next
+            elsif nxt == "\\"
+              out << "\\"; i += 2; next
+            elsif nxt == "$"
+              out << "$"; i += 2; next
+            else
+              out << "\\"; i += 1; next
+            end
+          end
+
+          if ch == "$" && template[i + 1] == "{"
+            close = template.index("}", i + 2)
+            if close.nil?
+              out << template[i..]
+              break
+            end
+            expr = template[(i + 2)...close]
+            raise TransformEngine.nested_interpolation_error(expr) if expr.include?("${")
+            out << evaluate_interpolation_expr(expr.strip, context)
+            i = close + 1
+            next
+          end
+
+          out << ch
+          i += 1
+        end
+        out
+      end
+
+      def evaluate_interpolation_expr(expr, context)
+        if expr.start_with?("%")
+          parser = TransformParser.new
+          parsed, = parser.send(:parse_expr_from_tokens, parser.send(:tokenize_expression, expr))
+          parsed ? dynvalue_string(evaluate(parsed, context)) : "${#{expr}}"
+        elsif expr.start_with?("@")
+          dynvalue_string(resolve_path(expr[1..], context))
+        else
+          "${#{expr}}"
+        end
+      end
+
       def process_loop_segment(segment, source, context, output, modifier_prefix: "")
-        # Resolve the array to iterate
-        each_path = segment.each_source
-        items = resolve_path_from_string(each_path, source, context)
-
-        # If the resolved value is null (path not found), skip iteration
-        # matching TypeScript which checks Array.isArray(items)
-        if items.is_a?(Types::DynValue) && items.null?
-          return
-        end
-
-        # If the resolved value is not an array, wrap single non-null values
-        if items.is_a?(Types::DynValue) && !items.array?
-          items = Types::DynValue.of_array([items])
-        end
-
-        return unless items.is_a?(Types::DynValue) && items.array?
-
-        # Check if this is a scalar array loop (only has _ = expr mappings)
-        has_underscore_only = segment.field_mappings.all? { |m| m.target_field == "_" } &&
-                              segment.field_mappings.any? && segment.children.empty?
-
+        loops = segment_loops(segment)
         results = []
-        loop_ctx = context.dup_for_loop
-        raise TransformError.new("Maximum loop nesting depth exceeded") if loop_ctx.loop_depth > VerbContext::MAX_LOOP_DEPTH
-
-        items.value.each_with_index do |item, idx|
-          loop_ctx.current_item = item
-          loop_ctx.loop_index = idx
-          loop_ctx.loop_length = items.value.length
-          loop_ctx.loop_vars["_item"] = item
-          loop_ctx.loop_vars["_index"] = Types::DynValue.of_integer(idx)
-          loop_ctx.loop_vars["_length"] = Types::DynValue.of_integer(items.value.length)
-
-          if segment.counter_name
-            loop_ctx.loop_vars[segment.counter_name] = Types::DynValue.of_integer(idx)
-          end
-
-          if has_underscore_only
-            # Scalar array: evaluate the _ mapping and use the result as the array element
-            val = Types::DynValue.of_null
-            segment.field_mappings.each do |mapping|
-              val = evaluate(mapping.expression, loop_ctx)
-              # Apply extraction directives first (:pos, :len, :field) as a group
-              val = apply_extraction_directives(val, mapping.directives)
-              # Apply remaining directives
-              mapping.directives.each do |directive|
-                next if %w[pos len field].include?(directive.name)
-                val = apply_directive(val, directive, item, loop_ctx)
-              end
-            end
-            results << val
-          else
-            item_result = {}
-            segment.field_mappings.each do |mapping|
-              process_mapping(mapping, item, loop_ctx, item_result, modifier_prefix: modifier_prefix)
-            end
-
-            # Process children
-            segment.children.each do |child|
-              process_segment(child, item, loop_ctx, item_result, modifier_prefix: modifier_prefix)
-            end
-
-            results << item_result if item_result.any?
-          end
-        end
+        iterate_loops(loops, 0, segment, source, context, results, modifier_prefix: modifier_prefix)
 
         return if sink_segment?(segment)
 
         seg_name = segment.name
         # Always set the array in output, even if empty
         set_output_path(output, seg_name, results)
+      end
+
+      # Normalize a segment's loop directives to a list of {source:, alias:} specs.
+      def segment_loops(segment)
+        if segment.loops && !segment.loops.empty?
+          segment.loops
+        else
+          [{ source: segment.each_source, alias: nil }]
+        end
+      end
+
+      # Drive one or more :loop directives as a nested cross-product. Each level
+      # binds its alias and current item, then recurses; the innermost level emits
+      # one element per item. A non-array source at any level yields no rows.
+      def iterate_loops(loops, depth, segment, source, context, results, modifier_prefix: "", on_item: nil)
+        loop_ctx = context.dup_for_loop
+        raise TransformError.new("Maximum loop nesting depth exceeded") if loop_ctx.loop_depth > VerbContext::MAX_LOOP_DEPTH
+
+        spec = loops[depth]
+        is_outermost = depth.zero?
+        is_innermost = depth == loops.length - 1
+
+        items = resolve_loop_items(spec[:source], is_outermost, source, context)
+        return unless items.is_a?(Types::DynValue) && items.array?
+
+        has_underscore_only = segment.field_mappings.all? { |m| m.target_field == "_" } &&
+                              segment.field_mappings.any? && segment.children.empty?
+
+        items.value.each_with_index do |item, idx|
+          item_ctx = loop_ctx.dup_for_loop
+          item_ctx.loop_depth = loop_ctx.loop_depth
+          item_ctx.current_item = item
+          item_ctx.loop_index = idx
+          item_ctx.loop_length = items.value.length
+          item_ctx.loop_vars["_item"] = item
+          item_ctx.loop_vars["_index"] = Types::DynValue.of_integer(idx)
+          item_ctx.loop_vars["_length"] = Types::DynValue.of_integer(items.value.length)
+          item_ctx.aliases[spec[:alias]] = item if spec[:alias]
+
+          # :counter binds the innermost index and resets per outer item.
+          if segment.counter_name && is_innermost
+            item_ctx.loop_vars[segment.counter_name] = Types::DynValue.of_integer(idx)
+          end
+
+          unless is_innermost
+            iterate_loops(loops, depth + 1, segment, item, item_ctx, results,
+                          modifier_prefix: modifier_prefix, on_item: on_item)
+            next
+          end
+
+          if on_item
+            on_item.call(item_ctx)
+            next
+          end
+
+          if has_underscore_only
+            val = Types::DynValue.of_null
+            segment.field_mappings.each do |mapping|
+              val = evaluate(mapping.expression, item_ctx)
+              val = apply_extraction_directives(val, mapping.directives)
+              mapping.directives.each do |directive|
+                next if %w[pos len field].include?(directive.name)
+                val = apply_directive(val, directive, item, item_ctx)
+              end
+            end
+            results << val
+          else
+            item_result = {}
+            segment.field_mappings.each do |mapping|
+              process_mapping(mapping, item, item_ctx, item_result, modifier_prefix: modifier_prefix)
+            end
+            segment.children.each do |child|
+              process_segment(child, item, item_ctx, item_result, modifier_prefix: modifier_prefix)
+            end
+            results << item_result if item_result.any?
+          end
+        end
+      end
+
+      # Resolve the array for a loop level. Outermost resolves against the source
+      # root; inner levels resolve relative (.field) or aliased paths against the
+      # current item.
+      def resolve_loop_items(path, is_outermost, source, context)
+        p = path.to_s
+        p = p[1..] if p.start_with?("@")
+
+        items = if p.start_with?(".")
+                  base = context.in_loop? && context.current_item ? context.current_item : source
+                  resolve_dotted_path(base, p[1..])
+                elsif is_outermost
+                  resolve_path_from_string(p, source, context)
+                else
+                  first = p.split(".").first
+                  if context.aliases.key?(first)
+                    aliased = context.aliases[first]
+                    rest = p.include?(".") ? p[(first.length + 1)..] : ""
+                    rest.empty? ? aliased : resolve_dotted_path(aliased, rest)
+                  else
+                    base = context.in_loop? && context.current_item ? context.current_item : source
+                    resolve_dotted_path(base, p)
+                  end
+                end
+
+        items
       end
 
       def process_mapping(mapping, source, context, output, modifier_prefix: "")
@@ -892,6 +1036,10 @@ module Odin
           return context.loop_vars[path]
         end
 
+        # A leading :loop :as alias resolves against its bound item.
+        aliased = resolve_via_alias(path, context)
+        return aliased unless aliased.nil?
+
         # Determine source to navigate
         current_source = if context.in_loop? && context.current_item
                            context.current_item
@@ -901,6 +1049,19 @@ module Odin
 
         # Navigate the path
         resolve_dotted_path(current_source, path)
+      end
+
+      # When the first dotted segment names a :loop alias, resolve the remainder
+      # against the bound item. Returns nil when the path is not alias-led.
+      def resolve_via_alias(path, context)
+        return nil unless context.respond_to?(:aliases) && context.aliases && !context.aliases.empty?
+
+        first = path.split(".").first
+        return nil unless context.aliases.key?(first)
+
+        aliased = context.aliases[first]
+        rest = path.include?(".") ? path[(first.length + 1)..] : ""
+        rest.empty? ? aliased : resolve_dotted_path(aliased, rest)
       end
 
       def resolve_path_from_string(path_str, source, context)
@@ -914,6 +1075,10 @@ module Odin
           if sub_path.nil? || sub_path.empty?
             return context.in_loop? && context.current_item ? context.current_item : source
           end
+
+          # A leading :loop :as alias resolves against its bound item.
+          aliased = resolve_via_alias(sub_path, context)
+          return aliased unless aliased.nil?
 
           current_source = if context.in_loop? && context.current_item
                              context.current_item
@@ -1815,6 +1980,12 @@ module Odin
           seg_name = segment.name
           seg_data = resolve_segment_data(output_dv, seg_name)
 
+          literal_lines = extract_literal_lines(seg_data)
+          if literal_lines
+            literal_lines.each { |l| lines << l }
+            next
+          end
+
           if segment.is_array && seg_data.is_a?(Array)
             # Array segment: one line per item
             seg_data.each do |item|
@@ -1850,6 +2021,16 @@ module Odin
         stripped.to_i
       rescue
         default_val
+      end
+
+      # Returns the verbatim lines of a rendered :literal segment, or nil.
+      def extract_literal_lines(seg_data)
+        return nil unless seg_data.is_a?(Types::DynValue) && seg_data.object?
+
+        marker = seg_data.get("__literalLines")
+        return nil unless marker.is_a?(Types::DynValue) && marker.array?
+
+        marker.value.map { |v| v.is_a?(Types::DynValue) ? v.to_string : v.to_s }
       end
 
       def resolve_segment_data(output_dv, seg_name)
