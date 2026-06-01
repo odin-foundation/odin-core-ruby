@@ -8,8 +8,8 @@ module Odin
       # Email: RFC 5322 simplified
       EMAIL_RE = /\A[^@\s]+@[^@\s]+\.[^@\s]+\z/
 
-      # URI: scheme://...
-      URI_RE = /\A[a-zA-Z][a-zA-Z0-9+\-.]*:/
+      # URI: scheme:non-whitespace
+      URI_RE = /\A[a-zA-Z][a-zA-Z0-9+\-.]*:[^\s]*\z/
 
       # URL: http(s)://...
       URL_RE = %r{\Ahttps?://[^\s/$.?#].[^\s]*\z}
@@ -35,8 +35,8 @@ module Odin
       # Phone: international format
       PHONE_RE = /\A\+?[\d\s\-().]{7,20}\z/
 
-      # Credit card: 13-19 digits (spaces/dashes allowed)
-      CREDIT_CARD_RE = /\A[\d\s\-]{13,25}\z/
+      # Credit card: 13-19 digits
+      CREDIT_CARD_RE = /\A\d{13,19}\z/
 
       # SSN: 123-45-6789 or 123456789
       SSN_RE = /\A\d{3}-?\d{2}-?\d{4}\z/
@@ -70,7 +70,7 @@ module Odin
       ISIN_RE = /\A[A-Z]{2}[A-Z0-9]{9}\d\z/
 
       # LEI: 20 chars alphanumeric
-      LEI_RE = /\A[A-Z0-9]{18}\d{2}\z/
+      LEI_RE = /\A[A-Z0-9]{20}\z/
 
       # NPI: 10 digits
       NPI_RE = /\A\d{10}\z/
@@ -139,7 +139,7 @@ module Odin
         "fein"          => ->(v) { EIN_RE.match?(v) },
         "zip"           => ->(v) { ZIP_RE.match?(v) },
         "vin"           => ->(v) { VIN_RE.match?(v.upcase) },
-        "iban"          => ->(v) { IBAN_RE.match?(v.gsub(/\s/, "").upcase) },
+        "iban"          => ->(v) { IBAN_RE.match?(v.upcase) },
         "bic"           => ->(v) { BIC_RE.match?(v.upcase) },
         "swift"         => ->(v) { BIC_RE.match?(v.upcase) },
         "routing"       => ->(v) { ROUTING_RE.match?(v) },
@@ -226,9 +226,7 @@ module Odin
 
       def self.validate_creditcard(value)
         return false unless CREDIT_CARD_RE.match?(value)
-        digits = value.gsub(/[\s\-]/, "")
-        return false if digits.length < 13 || digits.length > 19
-        luhn_check?(digits)
+        luhn_check?(value)
       end
 
       private_class_method :validate_ipv4, :validate_ipv6, :luhn_check?,
