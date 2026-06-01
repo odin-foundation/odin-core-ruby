@@ -1004,6 +1004,17 @@ RSpec.describe Odin::Transform::TransformEngine do
       expect(result).to eq(dv.of_bool(true))
     end
 
+    it "invokes coerceTimestamp" do
+      result = engine.invoke_verb("coerceTimestamp", [dv.of_string("2024-06-15T09:30:00Z")], ctx)
+      expect(result.timestamp?).to be true
+      expect(result.to_string).to eq("2024-06-15T09:30:00.000Z")
+    end
+
+    it "coerceTimestamp returns null for an unparseable value" do
+      result = engine.invoke_verb("coerceTimestamp", [dv.of_string("not a date")], ctx)
+      expect(result.null?).to be true
+    end
+
     it "invokes isString" do
       expect(engine.invoke_verb("isString", [dv.of_string("x")], ctx)).to eq(dv.of_bool(true))
       expect(engine.invoke_verb("isString", [dv.of_integer(1)], ctx)).to eq(dv.of_bool(false))
@@ -1105,8 +1116,8 @@ RSpec.describe Odin::Transform::TransformEngine do
     it "invokes sequence" do
       r1 = engine.invoke_verb("sequence", [dv.of_string("seq1")], ctx)
       r2 = engine.invoke_verb("sequence", [dv.of_string("seq1")], ctx)
-      expect(r1).to eq(dv.of_integer(0))
-      expect(r2).to eq(dv.of_integer(1))
+      expect(r1).to eq(dv.of_integer(1))
+      expect(r2).to eq(dv.of_integer(2))
     end
 
     it "invokes at" do

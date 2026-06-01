@@ -420,44 +420,44 @@ RSpec.describe "Collection Verbs" do
   # ── find ──
 
   describe "find" do
-    it "returns first truthy item" do
-      data = arr(int(0), int(42), int(99))
-      result = invoke("find", data)
-      expect(result.to_number).to eq(42)
+    it "returns the first item matching a field condition" do
+      data = arr(obj(name: "A", status: "x"), obj(name: "B", status: "active"))
+      result = invoke("find", data, str("status"), str("="), str("active"))
+      expect(result.get("name").to_string).to eq("B")
     end
 
-    it "returns null when not found" do
-      data = arr(int(0), null_val, bool(false))
-      result = invoke("find", data)
+    it "returns null when no item matches" do
+      data = arr(obj(status: "x"), obj(status: "y"))
+      result = invoke("find", data, str("status"), str("="), str("active"))
       expect(result.null?).to be true
     end
 
-    it "finds by field" do
-      data = arr(obj(name: "A", ok: false), obj(name: "B", ok: true))
-      result = invoke("find", data, str("ok"))
-      expect(result.get("name").to_string).to eq("B")
+    it "returns null with fewer than four arguments" do
+      data = arr(obj(status: "active"))
+      result = invoke("find", data, str("status"))
+      expect(result.null?).to be true
     end
   end
 
   # ── findIndex ──
 
   describe "findIndex" do
-    it "returns index of first truthy" do
-      data = arr(int(0), int(0), int(5))
-      result = invoke("findIndex", data)
-      expect(result.value).to eq(2)
+    it "returns the index of the first matching item" do
+      data = arr(obj(status: "x"), obj(status: "active"))
+      result = invoke("findIndex", data, str("status"), str("="), str("active"))
+      expect(result.value).to eq(1)
     end
 
-    it "returns -1 when not found" do
-      data = arr(int(0), null_val)
-      result = invoke("findIndex", data)
+    it "returns -1 when no item matches" do
+      data = arr(obj(status: "x"), obj(status: "y"))
+      result = invoke("findIndex", data, str("status"), str("="), str("active"))
       expect(result.value).to eq(-1)
     end
 
-    it "finds index by field" do
-      data = arr(obj(ok: false), obj(ok: true))
-      result = invoke("findIndex", data, str("ok"))
-      expect(result.value).to eq(1)
+    it "returns -1 with fewer than four arguments" do
+      data = arr(obj(status: "active"))
+      result = invoke("findIndex", data, str("status"))
+      expect(result.value).to eq(-1)
     end
   end
 
@@ -540,40 +540,42 @@ RSpec.describe "Collection Verbs" do
   # ── groupBy ──
 
   describe "groupBy" do
-    it "groups objects by field" do
+    it "groups objects into {key, items} entries by field" do
       data = arr(
         obj(dept: "eng", name: "A"),
         obj(dept: "sales", name: "B"),
         obj(dept: "eng", name: "C")
       )
       result = invoke("groupBy", data, str("dept"))
-      expect(result.object?).to be true
-      eng = result.get("eng")
-      expect(eng.value.length).to eq(2)
-      sales = result.get("sales")
-      expect(sales.value.length).to eq(1)
+      expect(result.array?).to be true
+      expect(result.value.length).to eq(2)
+
+      eng = result.value[0]
+      expect(eng.get("key").to_string).to eq("eng")
+      expect(eng.get("items").value.length).to eq(2)
+
+      sales = result.value[1]
+      expect(sales.get("key").to_string).to eq("sales")
+      expect(sales.get("items").value.length).to eq(1)
     end
   end
 
   # ── partition ──
 
   describe "partition" do
-    it "partitions by truthy field" do
-      data = arr(obj(ok: true, n: 1), obj(ok: false, n: 2), obj(ok: true, n: 3))
-      result = invoke("partition", data, str("ok"))
+    it "splits items by a field condition into matching and non-matching" do
+      data = arr(obj(status: "active", n: 1), obj(status: "x", n: 2), obj(status: "active", n: 3))
+      result = invoke("partition", data, str("status"), str("="), str("active"))
       pass = result.value[0].value
       fail_items = result.value[1].value
       expect(pass.length).to eq(2)
       expect(fail_items.length).to eq(1)
     end
 
-    it "partitions by truthy value without field" do
-      data = arr(int(1), int(0), int(3))
-      result = invoke("partition", data)
-      pass = result.value[0].value
-      fail_items = result.value[1].value
-      expect(pass.length).to eq(2)
-      expect(fail_items.length).to eq(1)
+    it "returns null with fewer than four arguments" do
+      data = arr(obj(status: "active"))
+      result = invoke("partition", data, str("status"))
+      expect(result.null?).to be true
     end
   end
 
@@ -717,13 +719,20 @@ RSpec.describe "Collection Verbs" do
   # ── rowNumber ──
 
   describe "rowNumber" do
-    it "returns incrementing row numbers" do
-      r1 = invoke("rowNumber")
-      r2 = invoke("rowNumber")
-      r3 = invoke("rowNumber")
-      expect(r1.value).to eq(1)
-      expect(r2.value).to eq(2)
-      expect(r3.value).to eq(3)
+    it "wraps primitives in {_rowNum, value} objects" do
+      data = arr(str("alice"), str("bob"))
+      result = invoke("rowNumber", data)
+      expect(result.value[0].get("_rowNum").value).to eq(1)
+      expect(result.value[0].get("value").to_string).to eq("alice")
+      expect(result.value[1].get("_rowNum").value).to eq(2)
+      expect(result.value[1].get("value").to_string).to eq("bob")
+    end
+
+    it "merges the row number into object items" do
+      data = arr(obj(name: "A"), obj(name: "B"))
+      result = invoke("rowNumber", data)
+      expect(result.value[0].get("_rowNum").value).to eq(1)
+      expect(result.value[0].get("name").to_string).to eq("A")
     end
   end
 
@@ -929,28 +938,28 @@ RSpec.describe "Collection Verbs" do
   # ── rank ──
 
   describe "rank" do
-    it "ranks descending by default" do
+    it "ranks descending by default, returning {_rank, value} objects" do
       data = arr(int(30), int(10), int(20))
       result = invoke("rank", data)
-      expect(result.value[0].value).to eq(1) # 30 is rank 1 desc
-      expect(result.value[1].value).to eq(3) # 10 is rank 3 desc
-      expect(result.value[2].value).to eq(2) # 20 is rank 2 desc
+      expect(result.value[0].get("_rank").value).to eq(1) # 30 is rank 1 desc
+      expect(result.value[1].get("_rank").value).to eq(3) # 10 is rank 3 desc
+      expect(result.value[2].get("_rank").value).to eq(2) # 20 is rank 2 desc
     end
 
     it "ranks ascending" do
       data = arr(int(30), int(10), int(20))
       result = invoke("rank", data, null_val, str("asc"))
-      expect(result.value[0].value).to eq(3) # 30 is rank 3 asc
-      expect(result.value[1].value).to eq(1) # 10 is rank 1 asc
-      expect(result.value[2].value).to eq(2) # 20 is rank 2 asc
+      expect(result.value[0].get("_rank").value).to eq(3) # 30 is rank 3 asc
+      expect(result.value[1].get("_rank").value).to eq(1) # 10 is rank 1 asc
+      expect(result.value[2].get("_rank").value).to eq(2) # 20 is rank 2 asc
     end
 
-    it "ranks by field" do
+    it "ranks by field, merging _rank into the object" do
       data = arr(obj(score: 80), obj(score: 95), obj(score: 70))
       result = invoke("rank", data, str("score"), str("desc"))
-      expect(result.value[0].value).to eq(2) # 80 is rank 2
-      expect(result.value[1].value).to eq(1) # 95 is rank 1
-      expect(result.value[2].value).to eq(3) # 70 is rank 3
+      expect(result.value[0].get("_rank").value).to eq(2) # 80 is rank 2
+      expect(result.value[1].get("_rank").value).to eq(1) # 95 is rank 1
+      expect(result.value[2].get("_rank").value).to eq(3) # 70 is rank 3
     end
   end
 
@@ -959,36 +968,36 @@ RSpec.describe "Collection Verbs" do
   describe "fillMissing" do
     it "fills with forward strategy" do
       data = arr(int(1), null_val, null_val, int(4))
-      result = invoke("fillMissing", data, str("forward"))
+      result = invoke("fillMissing", data, null_val, str("forward"))
       expect(result.value.map(&:to_number)).to eq([1, 1, 1, 4])
     end
 
     it "fills with backward strategy" do
       data = arr(null_val, null_val, int(3), int(4))
-      result = invoke("fillMissing", data, str("backward"))
+      result = invoke("fillMissing", data, null_val, str("backward"))
       expect(result.value.map(&:to_number)).to eq([3, 3, 3, 4])
     end
 
-    it "fills with value strategy" do
+    it "fills nulls with a specified value by default" do
       data = arr(int(1), null_val, int(3))
-      result = invoke("fillMissing", data, str("value"), int(0))
+      result = invoke("fillMissing", data, int(0))
       expect(result.value.map(&:to_number)).to eq([1, 0, 3])
     end
 
-    it "forward fill keeps null at start" do
+    it "forward fill uses the fill value at the start" do
       data = arr(null_val, int(2), null_val)
-      result = invoke("fillMissing", data, str("forward"))
-      expect(result.value[0].null?).to be true
+      result = invoke("fillMissing", data, int(0), str("forward"))
+      expect(result.value[0].to_number).to eq(0)
       expect(result.value[1].to_number).to eq(2)
       expect(result.value[2].to_number).to eq(2)
     end
 
-    it "backward fill keeps null at end" do
+    it "backward fill uses the fill value at the end" do
       data = arr(null_val, int(2), null_val)
-      result = invoke("fillMissing", data, str("backward"))
+      result = invoke("fillMissing", data, int(0), str("backward"))
       expect(result.value[0].to_number).to eq(2)
       expect(result.value[1].to_number).to eq(2)
-      expect(result.value[2].null?).to be true
+      expect(result.value[2].to_number).to eq(0)
     end
   end
 end

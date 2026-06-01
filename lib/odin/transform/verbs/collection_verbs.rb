@@ -37,6 +37,24 @@ module Odin
           a.to_string == b.to_string
         end
 
+        # Field/operator/value condition matching used by find, findIndex, partition.
+        def matches_condition?(item, field, op, compare)
+          val = item.object? ? item.get(field) : item
+          val ||= Types::DynValue.of_null
+          case op
+          when "=", "==" then val.to_string == compare.to_string
+          when "!=", "<>" then val.to_string != compare.to_string
+          when "<" then (NumericVerbs.to_double(val) || 0) < (NumericVerbs.to_double(compare) || 0)
+          when "<=" then (NumericVerbs.to_double(val) || 0) <= (NumericVerbs.to_double(compare) || 0)
+          when ">" then (NumericVerbs.to_double(val) || 0) > (NumericVerbs.to_double(compare) || 0)
+          when ">=" then (NumericVerbs.to_double(val) || 0) >= (NumericVerbs.to_double(compare) || 0)
+          when "contains" then val.to_string.include?(compare.to_string)
+          when "startsWith" then val.to_string.start_with?(compare.to_string)
+          when "endsWith" then val.to_string.end_with?(compare.to_string)
+          else false
+          end
+        end
+
         def register(registry)
           dv = Types::DynValue
 
@@ -226,24 +244,24 @@ module Odin
           }
 
           registry["find"] = ->(args, _ctx) {
+            return dv.of_null if args.length < 4
+
             items = CollectionVerbs.extract_items(args[0])
-            if args.length >= 2
-              field = args[1]&.to_string || ""
-              found = items.find { |item| (item.object? ? item.get(field) : item)&.truthy? || false }
-            else
-              found = items.find(&:truthy?)
-            end
+            field = args[1]&.to_string || ""
+            op = args[2]&.to_string || "="
+            compare = args[3]
+            found = items.find { |item| CollectionVerbs.matches_condition?(item, field, op, compare) }
             found || dv.of_null
           }
 
           registry["findIndex"] = ->(args, _ctx) {
+            return dv.of_integer(-1) if args.length < 4
+
             items = CollectionVerbs.extract_items(args[0])
-            if args.length >= 2
-              field = args[1]&.to_string || ""
-              idx = items.index { |item| (item.object? ? item.get(field) : item)&.truthy? || false }
-            else
-              idx = items.index(&:truthy?)
-            end
+            field = args[1]&.to_string || ""
+            op = args[2]&.to_string || "="
+            compare = args[3]
+            idx = items.index { |item| CollectionVerbs.matches_condition?(item, field, op, compare) }
             dv.of_integer(idx || -1)
           }
 
@@ -277,30 +295,38 @@ module Odin
           }
 
           registry["groupBy"] = ->(args, _ctx) {
+            return dv.of_null if args.length < 2
+
             items = CollectionVerbs.extract_items(args[0])
             field = args[1]&.to_string || ""
             groups = {}
+            order = []
             items.each do |item|
               key = if item.object?
-                       (item.get(field) || dv.of_null).to_string
-                     else
-                       item.to_string
-                     end
-              groups[key] ||= []
+                      (item.get(field) || dv.of_null).to_string
+                    else
+                      item.to_string
+                    end
+              unless groups.key?(key)
+                groups[key] = []
+                order << key
+              end
               groups[key] << item
             end
-            obj = groups.transform_values { |v| dv.of_array(v) }
-            dv.of_object(obj)
+            result = order.map do |key|
+              dv.of_object({ "key" => dv.of_string(key), "items" => dv.of_array(groups[key]) })
+            end
+            dv.of_array(result)
           }
 
           registry["partition"] = ->(args, _ctx) {
+            return dv.of_null if args.length < 4
+
             items = CollectionVerbs.extract_items(args[0])
-            if args.length >= 2
-              field = args[1]&.to_string || ""
-              pass_items, fail_items = items.partition { |item| (item.object? ? item.get(field) : item)&.truthy? || false }
-            else
-              pass_items, fail_items = items.partition(&:truthy?)
-            end
+            field = args[1]&.to_string || ""
+            op = args[2]&.to_string || "="
+            compare = args[3]
+            pass_items, fail_items = items.partition { |item| CollectionVerbs.matches_condition?(item, field, op, compare) }
             dv.of_array([dv.of_array(pass_items), dv.of_array(fail_items)])
           }
 
@@ -364,17 +390,19 @@ module Odin
             dv.of_array(items.reject { |item| item.null? || (item.string? && item.value.empty?) })
           }
 
-          registry["rowNumber"] = ->(args, ctx) {
-            name = "_rowNumber"
-            current = ctx.get_accumulator(name)
-            if current.null?
-              ctx.set_accumulator(name, dv.of_integer(1))
-              dv.of_integer(1)
-            else
-              next_val = current.to_number.to_i + 1
-              ctx.set_accumulator(name, dv.of_integer(next_val))
-              dv.of_integer(next_val)
+          registry["rowNumber"] = ->(args, _ctx) {
+            return dv.of_null if args.empty?
+
+            items = CollectionVerbs.extract_items(args[0])
+            result = items.each_with_index.map do |item, i|
+              num = dv.of_integer(i + 1)
+              if item.object?
+                dv.of_object({ "_rowNum" => num }.merge(item.value))
+              else
+                dv.of_object({ "_rowNum" => num, "value" => item })
+              end
             end
+            dv.of_array(result)
           }
 
           registry["sample"] = ->(args, _ctx) {
@@ -528,40 +556,62 @@ module Odin
           }
 
           registry["rank"] = ->(args, _ctx) {
-            items = CollectionVerbs.extract_items(args[0])
-            field = args[1]&.to_string
-            direction = args[2]&.to_string || "desc"
+            return dv.of_null if args.empty?
 
-            values = items.map do |item|
-              if field && item.object?
-                NumericVerbs.to_double(item.get(field))
+            items = CollectionVerbs.extract_items(args[0])
+            field = args.length > 1 ? args[1]&.to_string : nil
+            field = nil if field&.empty?
+            direction = (args.length > 2 ? args[2]&.to_string : "desc").to_s.downcase
+
+            comparable = ->(item) do
+              raw = field && item.object? ? item.get(field) : item
+              num = NumericVerbs.to_double(raw)
+              num.nil? ? (raw.nil? ? "" : raw.to_string) : num
+            end
+
+            indexed = items.each_index.map { |i| [i, comparable.call(items[i])] }
+            mult = direction == "asc" ? 1 : -1
+            sorted = indexed.sort do |a, b|
+              av = a[1]
+              bv = b[1]
+              if av.is_a?(Numeric) && bv.is_a?(Numeric)
+                (av <=> bv) * mult
               else
-                NumericVerbs.to_double(item)
+                (av.to_s <=> bv.to_s) * mult
               end
             end
 
-            sorted_unique = values.compact.uniq.sort
-            sorted_unique.reverse! if direction == "desc"
+            ranks = {}
+            current_rank = 1
+            sorted.each_with_index do |(orig_idx, val), i|
+              current_rank = i + 1 if i.positive? && val != sorted[i - 1][1]
+              ranks[orig_idx] = current_rank
+            end
 
-            rank_map = {}
-            sorted_unique.each_with_index { |v, i| rank_map[v] = i + 1 }
-
-            result = values.map do |v|
-              v.nil? ? dv.of_null : dv.of_integer(rank_map[v])
+            result = items.each_with_index.map do |item, i|
+              rank_val = dv.of_integer(ranks[i] || (i + 1))
+              if item.object?
+                dv.of_object({ "_rank" => rank_val }.merge(item.value))
+              else
+                dv.of_object({ "_rank" => rank_val, "value" => item })
+              end
             end
             dv.of_array(result)
           }
 
           registry["fillMissing"] = ->(args, _ctx) {
+            return dv.of_null if args.empty?
+
             items = CollectionVerbs.extract_items(args[0])
-            strategy = args[1]&.to_string || "value"
-            fill_val = args[2] || dv.of_null
+            fill_val = args.length >= 2 ? args[1] : dv.of_null
+            strategy = (args.length >= 3 ? args[2]&.to_string : "value").to_s.downcase
+            nullish = ->(item) { item.nil? || item.null? }
 
             case strategy
             when "forward"
-              last_val = dv.of_null
+              last_val = fill_val
               result = items.map do |item|
-                if item.null?
+                if nullish.call(item)
                   last_val
                 else
                   last_val = item
@@ -569,17 +619,22 @@ module Odin
                 end
               end
             when "backward"
-              last_val = dv.of_null
+              last_val = fill_val
               result = items.reverse.map do |item|
-                if item.null?
+                if nullish.call(item)
                   last_val
                 else
                   last_val = item
                   item
                 end
               end.reverse
+            when "mean"
+              nums = items.reject { |i| nullish.call(i) }.filter_map { |i| NumericVerbs.to_double(i) }
+              mean = nums.empty? ? 0.0 : nums.inject(0.0) { |s, v| s + v } / nums.length
+              mean_val = dv.of_float(mean)
+              result = items.map { |item| nullish.call(item) ? mean_val : item }
             else
-              result = items.map { |item| item.null? ? fill_val : item }
+              result = items.map { |item| nullish.call(item) ? fill_val : item }
             end
             dv.of_array(result)
           }

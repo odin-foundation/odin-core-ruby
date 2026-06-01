@@ -32,6 +32,7 @@ module Odin
         @tabular_columns = []
         @tabular_array_path = ""
         @tabular_row_index = 0
+        @pre_tabular_context = nil
 
         # Document chaining
         @documents = []
@@ -279,6 +280,10 @@ module Odin
       end
 
       def setup_tabular(array_path, columns_str, token)
+        # Section context to restore when the tabular block ends and a top-level
+        # assignment follows.
+        @pre_tabular_context = @context
+
         # Relative paths (starting with .) resolve relative to previous context
         # Absolute paths are used as-is (same logic as resolve_header_path)
         resolved_path = if array_path.start_with?(".")
@@ -334,6 +339,9 @@ module Odin
 
       def exit_tabular_mode!
         return unless @tabular_mode
+        # Restore the pre-tabular section context once data rows have been read, so
+        # a following top-level assignment is not nested under the array path.
+        @context = @pre_tabular_context if @tabular_row_index.positive? && !@pre_tabular_context.nil?
         @tabular_mode = false
         @tabular_primitive = false
         @tabular_columns = []

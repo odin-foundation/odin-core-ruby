@@ -52,7 +52,8 @@ module Odin
             items = CollectionVerbs.extract_items(args[0])
             nums = items.filter_map { |item| NumericVerbs.to_double(item) }
             return dv.of_null if nums.empty?
-            dv.of_float(nums.sum / nums.length.to_f)
+            total = nums.inject(0.0) { |s, v| s + v }
+            NumericVerbs.numeric_result(total / nums.length.to_f)
           }
 
           registry["first"] = ->(args, _ctx) {

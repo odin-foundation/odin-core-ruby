@@ -651,9 +651,9 @@ RSpec.describe "Numeric Verbs" do
       expect(result.value).to eq("1234567")
     end
 
-    it "rounds float to integer" do
+    it "floors a float to an integer" do
       result = invoke("formatInteger", dv.of_float(1234.7))
-      expect(result.value).to eq("1235")
+      expect(result.value).to eq("1234")
     end
 
     it "formats zero" do

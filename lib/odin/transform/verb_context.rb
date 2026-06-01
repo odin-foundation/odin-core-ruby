@@ -21,7 +21,8 @@ module Odin
                     :source_format,   # String — source format for directive handling
                     :on_validation,   # String — validation policy (fail / warn / skip)
                     :on_missing,      # String — missing-data policy (fail / warn / skip / default)
-                    :on_error         # String — error policy (fail / warn / skip)
+                    :on_error,        # String — error policy (fail / warn / skip)
+                    :strict_types     # Boolean — enforce verb argument type signatures
 
       MAX_LOOP_DEPTH = 10
 
@@ -45,6 +46,7 @@ module Odin
         @on_validation = nil
         @on_missing = nil
         @on_error = nil
+        @strict_types = false
       end
 
       def next_sequence(name)

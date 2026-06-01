@@ -488,34 +488,37 @@ RSpec.describe "Financial Verbs" do
   # ── zscore ──
 
   describe "zscore" do
-    it "computes z-score for known values" do
-      # value=10, mean=5, stddev=2 => (10-5)/2 = 2.5
-      result = invoke("zscore", dv.of_float(10.0), dv.of_float(5.0), dv.of_float(2.0))
-      expect(result.value).to be_within(0.001).of(2.5)
+    let(:dataset) { dv.of_array([dv.of_float(70.0), dv.of_float(75.0), dv.of_float(80.0), dv.of_float(85.0), dv.of_float(90.0)]) }
+
+    it "computes z-score of a value against a dataset" do
+      # value=85, mean=80, population stddev≈7.071 => ≈0.7071
+      result = invoke("zscore", dv.of_float(85.0), dataset)
+      expect(result.value).to be_within(0.0001).of(0.7071067811865475)
     end
 
-    it "returns 0 when value equals mean" do
-      result = invoke("zscore", dv.of_float(5.0), dv.of_float(5.0), dv.of_float(2.0))
+    it "returns 0 when value equals the mean" do
+      result = invoke("zscore", dv.of_float(80.0), dataset)
       expect(result.value).to be_within(0.001).of(0.0)
     end
 
     it "returns null when stddev is 0" do
-      result = invoke("zscore", dv.of_float(10.0), dv.of_float(5.0), dv.of_float(0.0))
+      flat = dv.of_array([dv.of_float(5.0), dv.of_float(5.0), dv.of_float(5.0)])
+      result = invoke("zscore", dv.of_float(10.0), flat)
       expect(result.null?).to be true
     end
 
     it "returns null when value is null" do
-      result = invoke("zscore", dv.of_null, dv.of_float(5.0), dv.of_float(2.0))
+      result = invoke("zscore", dv.of_null, dataset)
       expect(result.null?).to be true
     end
 
-    it "returns null when mean is null" do
-      result = invoke("zscore", dv.of_float(10.0), dv.of_null, dv.of_float(2.0))
+    it "returns null with fewer than two arguments" do
+      result = invoke("zscore", dv.of_float(85.0))
       expect(result.null?).to be true
     end
 
-    it "returns null when stddev is null" do
-      result = invoke("zscore", dv.of_float(10.0), dv.of_float(5.0), dv.of_null)
+    it "returns null when the dataset is empty" do
+      result = invoke("zscore", dv.of_float(85.0), dv.of_array([]))
       expect(result.null?).to be true
     end
   end
@@ -523,34 +526,39 @@ RSpec.describe "Financial Verbs" do
   # ── interpolate ──
 
   describe "interpolate" do
-    it "computes basic linear interpolation" do
-      # a=0, b=10, t=0.5 => 5.0
+    it "computes linear interpolation between two points" do
+      # x=5, (x1=0, y1=100), (x2=10, y2=200) => 150
+      result = invoke("interpolate", dv.of_float(5.0), dv.of_float(0.0), dv.of_float(100.0),
+                      dv.of_float(10.0), dv.of_float(200.0))
+      expect(result.value).to be_within(0.001).of(150.0)
+    end
+
+    it "returns y1 when x equals x1" do
+      result = invoke("interpolate", dv.of_float(0.0), dv.of_float(0.0), dv.of_float(100.0),
+                      dv.of_float(10.0), dv.of_float(200.0))
+      expect(result.value).to be_within(0.001).of(100.0)
+    end
+
+    it "returns y2 when x equals x2" do
+      result = invoke("interpolate", dv.of_float(10.0), dv.of_float(0.0), dv.of_float(100.0),
+                      dv.of_float(10.0), dv.of_float(200.0))
+      expect(result.value).to be_within(0.001).of(200.0)
+    end
+
+    it "returns y1 when x2 equals x1" do
+      result = invoke("interpolate", dv.of_float(5.0), dv.of_float(4.0), dv.of_float(100.0),
+                      dv.of_float(4.0), dv.of_float(200.0))
+      expect(result.value).to be_within(0.001).of(100.0)
+    end
+
+    it "returns null with fewer than five arguments" do
       result = invoke("interpolate", dv.of_float(0.0), dv.of_float(10.0), dv.of_float(0.5))
-      expect(result.value).to be_within(0.001).of(5.0)
-    end
-
-    it "returns a when t=0" do
-      result = invoke("interpolate", dv.of_float(3.0), dv.of_float(7.0), dv.of_float(0.0))
-      expect(result.value).to be_within(0.001).of(3.0)
-    end
-
-    it "returns b when t=1" do
-      result = invoke("interpolate", dv.of_float(3.0), dv.of_float(7.0), dv.of_float(1.0))
-      expect(result.value).to be_within(0.001).of(7.0)
-    end
-
-    it "returns null when a is null" do
-      result = invoke("interpolate", dv.of_null, dv.of_float(10.0), dv.of_float(0.5))
       expect(result.null?).to be true
     end
 
-    it "returns null when b is null" do
-      result = invoke("interpolate", dv.of_float(0.0), dv.of_null, dv.of_float(0.5))
-      expect(result.null?).to be true
-    end
-
-    it "returns null when t is null" do
-      result = invoke("interpolate", dv.of_float(0.0), dv.of_float(10.0), dv.of_null)
+    it "returns null when an argument is null" do
+      result = invoke("interpolate", dv.of_null, dv.of_float(0.0), dv.of_float(100.0),
+                      dv.of_float(10.0), dv.of_float(200.0))
       expect(result.null?).to be true
     end
   end

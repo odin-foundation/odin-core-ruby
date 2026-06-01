@@ -365,6 +365,32 @@ module Odin
         verb_fn.call(args, context)
       end
 
+      # Verbs whose leading arguments must be numeric; checked under strictTypes.
+      NUMERIC_ARG_VERBS = %w[
+        sqrt abs round floor ceil negate sign trunc ln log log10 log2 exp pow
+        add subtract multiply divide mod between formatNumber formatInteger
+        formatCurrency toRadians toDegrees
+      ].freeze
+
+      NUMERIC_DYN_TYPES = %i[integer float float_raw currency currency_raw percent null].freeze
+
+      # T002: under strictTypes, a numeric verb argument that is not a numeric
+      # (or null) value fails the field.
+      def check_verb_arg_types!(verb_name, args)
+        return unless NUMERIC_ARG_VERBS.include?(verb_name)
+
+        args.each_with_index do |arg, i|
+          next if arg.nil?
+          next if NUMERIC_DYN_TYPES.include?(arg.type)
+
+          err = TransformError.new(
+            "Verb '#{verb_name}' arg #{i + 1}: expected number, got #{arg.type}",
+            code: ErrorCodes::T002_INVALID_VERB_ARGS
+          )
+          raise CodedTransformError.new(err)
+        end
+      end
+
       # ── Expression Evaluation ──
 
       def evaluate(expr, context)
@@ -583,6 +609,7 @@ module Odin
         context.on_missing = om if om && !om.empty?
         oe = transform_def.header.target_options["onError"]
         context.on_error = oe if oe && !oe.empty?
+        context.strict_types = transform_def.header.strict_types
 
         # Initialize constants
         transform_def.constants.each do |key, val|
@@ -1503,6 +1530,11 @@ module Odin
           return evaluated_args.first || Types::DynValue.of_null
         end
 
+        # T002: enforce verb argument types under strictTypes.
+        if context.strict_types
+          check_verb_arg_types!(verb_name, evaluated_args)
+        end
+
         # Look up and invoke verb
         invoke_verb(verb_name, evaluated_args, context)
       end
@@ -1939,6 +1971,14 @@ module Odin
       end
 
       def coerce_to_currency(val, dp = 2, currency_code = nil)
+        if val.type == :currency || val.type == :currency_raw
+          existing_dp = val.decimal_places || dp
+          code = currency_code || val.currency_code
+          if val.type == :currency_raw
+            return Types::DynValue.of_currency_raw(val.value, existing_dp, code)
+          end
+          return Types::DynValue.of_currency(val.value.to_f, existing_dp, code)
+        end
         if val.type == :float || val.type == :float_raw
           f = val.to_number.to_f
           formatted = format("%.#{dp}f", f)
@@ -2213,6 +2253,23 @@ module Odin
           return ""
         end
 
+        # T007: positional layout directives (:pos/:len) only apply to fixed-width
+        # output; on any other target they are invalid for the format.
+        if context && target_format != "fixed-width"
+          transform_def.segments.each do |segment|
+            segment.field_mappings.each do |mapping|
+              next unless mapping.directives.any? { |d| %w[pos len].include?(d.name) }
+
+              err = TransformError.new(
+                "Modifier ':pos/:len' is not valid for #{target_format} output",
+                code: ErrorCodes::T007_INVALID_MODIFIER
+              )
+              err.field = mapping.target_field
+              context.errors << err
+            end
+          end
+        end
+
         case target_format
         when "json"
           topts = transform_def.header.target_options
@@ -2241,7 +2298,7 @@ module Odin
           end
           FormatExporters.to_csv(csv_dv, delimiter: delimiter, header: include_header)
         when "fixed-width"
-          format_fixed_width_output(output_dv, transform_def)
+          format_fixed_width_output(output_dv, transform_def, context)
         when "flat", "properties"
           style = transform_def.header.target_options["style"]
           if style == "yaml"
@@ -2256,10 +2313,32 @@ module Odin
       end
 
       # Format output as fixed-width text (segment-based, matching TypeScript)
-      def format_fixed_width_output(output_dv, transform_def)
+      def format_fixed_width_output(output_dv, transform_def, context = nil)
         lw = transform_def.header.target_options["lineWidth"]
         has_line_width = !lw.nil? && parse_target_int(lw, 0) > 0
         line_width = has_line_width ? parse_target_int(lw, 80) : 80
+
+        # T010: a field whose pos+len exceeds the configured line width overflows.
+        if has_line_width && context
+          transform_def.segments.each do |segment|
+            segment.field_mappings.each do |mapping|
+              pos_dir = mapping.directives.find { |d| d.name == "pos" }
+              len_dir = mapping.directives.find { |d| d.name == "len" }
+              next unless pos_dir && len_dir
+
+              pos = pos_dir.value.to_i
+              len = len_dir.value.to_i
+              next unless pos + len > line_width
+
+              err = TransformError.new(
+                "Field '#{mapping.target_field}' position #{pos} + length #{len} exceeds line width #{line_width}",
+                code: ErrorCodes::T010_POSITION_OVERFLOW
+              )
+              err.field = mapping.target_field
+              context.errors << err
+            end
+          end
+        end
         default_pad = transform_def.header.target_options["padChar"] || " "
         truncate = transform_def.header.target_options["truncate"] == "true"
         line_ending = transform_def.header.target_options["lineEnding"] || "\n"
@@ -2613,7 +2692,7 @@ module Odin
         registry["capitalize"] = ->(args, _ctx) {
           if args[0]&.string?
             s = args[0].value
-            Types::DynValue.of_string(s.empty? ? s : s[0].upcase + s[1..])
+            Types::DynValue.of_string(s.empty? ? s : s[0].upcase + s[1..].downcase)
           else
             args[0] || Types::DynValue.of_null
           end
@@ -2873,15 +2952,23 @@ module Odin
 
         # Sequence
         registry["sequence"] = ->(args, ctx) {
-          name = args[0]&.to_string || "default"
-          val = ctx.next_sequence(name)
-          Types::DynValue.of_integer(val)
+          return Types::DynValue.of_integer(1) if args.empty?
+
+          name = args[0].to_string
+          start_value = args.length > 1 ? (args[1]&.to_number || 1).floor : 1
+          current = ctx.sequences[name]
+          current = current.nil? ? start_value : current + 1
+          ctx.sequences[name] = current
+          Types::DynValue.of_integer(current)
         }
 
         registry["resetSequence"] = ->(args, ctx) {
-          name = args[0]&.to_string || "default"
-          ctx.reset_sequence(name)
-          Types::DynValue.of_integer(0)
+          return Types::DynValue.of_null if args.empty?
+
+          name = args[0].to_string
+          value = args.length > 1 ? (args[1]&.to_number || 0).floor : 0
+          ctx.sequences[name] = value
+          Types::DynValue.of_integer(value)
         }
 
         # Min/Max of variadic
@@ -3305,10 +3392,27 @@ module Odin
         }
 
         registry["wrap"] = ->(args, _ctx) {
+          return Types::DynValue.of_null if args.length < 2
+
           s = args[0]&.to_string || ""
-          prefix = args[1]&.to_string || ""
-          suffix = args[2]&.to_string || ""
-          Types::DynValue.of_string(prefix + s + suffix)
+          width = (args[1]&.to_number || 0).floor
+          return Types::DynValue.of_null if width <= 0
+          return Types::DynValue.of_string(s) if s.length <= width
+
+          lines = []
+          current = +""
+          s.split(/\s+/).each do |word|
+            if current.empty?
+              current = word.dup
+            elsif current.length + 1 + word.length <= width
+              current << " " << word
+            else
+              lines << current
+              current = word.dup
+            end
+          end
+          lines << current unless current.empty?
+          Types::DynValue.of_string(lines.join("\n"))
         }
 
         registry["tokenize"] = ->(args, _ctx) {
@@ -3339,21 +3443,12 @@ module Odin
         }
 
         registry["between"] = ->(args, _ctx) {
-          s = args[0]&.to_string || ""
-          start_delim = args[1]&.to_string || ""
-          end_delim = args[2]&.to_string || ""
-          start_idx = s.index(start_delim)
-          if start_idx
-            after_start = start_idx + start_delim.length
-            end_idx = s.index(end_delim, after_start)
-            if end_idx
-              Types::DynValue.of_string(s[after_start...end_idx])
-            else
-              Types::DynValue.of_string("")
-            end
-          else
-            Types::DynValue.of_string("")
-          end
+          return Types::DynValue.of_null if args.length < 3
+
+          value = args[0]&.to_number || 0
+          min = args[1]&.to_number || 0
+          max = args[2]&.to_number || 0
+          Types::DynValue.of_bool(value >= min && value <= max)
         }
 
         # ── Encoding verbs ──
@@ -3448,7 +3543,7 @@ module Odin
         registry["crc32"] = ->(args, _ctx) {
           s = args[0]&.to_string || ""
           require "zlib"
-          Types::DynValue.of_integer(Zlib.crc32(s))
+          Types::DynValue.of_string(format("%08x", Zlib.crc32(s)))
         }
 
         # ── Logic verbs ──

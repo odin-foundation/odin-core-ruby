@@ -13,6 +13,15 @@ module Odin
           NumericVerbs.numeric_result(val)
         end
 
+        # Left-fold sum (sequential accumulation, no compensated summation).
+        def naive_sum(nums)
+          nums.inject(0.0) { |s, v| s + v }
+        end
+
+        def naive_mean(nums)
+          naive_sum(nums) / nums.length
+        end
+
         def register(registry)
           dv = Types::DynValue
 
@@ -173,36 +182,36 @@ module Odin
             items = CollectionVerbs.extract_items(args[0])
             nums = items.filter_map { |item| NumericVerbs.to_double(item) }
             return dv.of_null if nums.empty?
-            mean = nums.sum / nums.length.to_f
-            var = nums.sum { |n| (n - mean)**2 } / nums.length.to_f
-            dv.of_float(var)
+            mean = FinancialVerbs.naive_mean(nums)
+            var = FinancialVerbs.naive_sum(nums.map { |n| (n - mean)**2 }) / nums.length.to_f
+            NumericVerbs.numeric_result(var)
           }
 
           registry["varianceSample"] = ->(args, _ctx) {
             items = CollectionVerbs.extract_items(args[0])
             nums = items.filter_map { |item| NumericVerbs.to_double(item) }
             return dv.of_null if nums.length < 2
-            mean = nums.sum / nums.length.to_f
-            var = nums.sum { |n| (n - mean)**2 } / (nums.length - 1).to_f
-            dv.of_float(var)
+            mean = FinancialVerbs.naive_mean(nums)
+            var = FinancialVerbs.naive_sum(nums.map { |n| (n - mean)**2 }) / (nums.length - 1).to_f
+            NumericVerbs.numeric_result(var)
           }
 
           registry["std"] = ->(args, _ctx) {
             items = CollectionVerbs.extract_items(args[0])
             nums = items.filter_map { |item| NumericVerbs.to_double(item) }
             return dv.of_null if nums.empty?
-            mean = nums.sum / nums.length.to_f
-            var = nums.sum { |n| (n - mean)**2 } / nums.length.to_f
-            dv.of_float(Math.sqrt(var))
+            mean = FinancialVerbs.naive_mean(nums)
+            var = FinancialVerbs.naive_sum(nums.map { |n| (n - mean)**2 }) / nums.length.to_f
+            NumericVerbs.numeric_result(Math.sqrt(var))
           }
 
           registry["stdSample"] = ->(args, _ctx) {
             items = CollectionVerbs.extract_items(args[0])
             nums = items.filter_map { |item| NumericVerbs.to_double(item) }
             return dv.of_null if nums.length < 2
-            mean = nums.sum / nums.length.to_f
-            var = nums.sum { |n| (n - mean)**2 } / (nums.length - 1).to_f
-            dv.of_float(Math.sqrt(var))
+            mean = FinancialVerbs.naive_mean(nums)
+            var = FinancialVerbs.naive_sum(nums.map { |n| (n - mean)**2 }) / (nums.length - 1).to_f
+            NumericVerbs.numeric_result(Math.sqrt(var))
           }
 
           registry["median"] = ->(args, _ctx) {
@@ -299,20 +308,36 @@ module Odin
           }
 
           registry["zscore"] = ->(args, _ctx) {
+            return dv.of_null if args.length < 2
+
             value = NumericVerbs.to_double(args[0])
-            mean = NumericVerbs.to_double(args[1])
-            stddev = NumericVerbs.to_double(args[2])
-            return dv.of_null if value.nil? || mean.nil? || stddev.nil? || stddev == 0
-            dv.of_float((value - mean) / stddev)
+            return dv.of_null if value.nil?
+            nums = CollectionVerbs.extract_items(args[1]).filter_map { |item| NumericVerbs.to_double(item) }
+            return dv.of_null if nums.empty?
+
+            mean = FinancialVerbs.naive_mean(nums)
+            var = FinancialVerbs.naive_sum(nums.map { |n| (n - mean)**2 }) / nums.length.to_f
+            stddev = Math.sqrt(var)
+            return dv.of_null if stddev == 0
+
+            z = (value - mean) / stddev
+            return dv.of_null unless z.finite?
+            NumericVerbs.numeric_result(z)
           }
 
           registry["interpolate"] = ->(args, _ctx) {
-            a = NumericVerbs.to_double(args[0])
-            b = NumericVerbs.to_double(args[1])
-            t = NumericVerbs.to_double(args[2])
-            return dv.of_null if a.nil? || b.nil? || t.nil?
-            result = a + (b - a) * t
-            FinancialVerbs.safe_result(result)
+            return dv.of_null if args.length < 5
+
+            x = NumericVerbs.to_double(args[0])
+            x1 = NumericVerbs.to_double(args[1])
+            y1 = NumericVerbs.to_double(args[2])
+            x2 = NumericVerbs.to_double(args[3])
+            y2 = NumericVerbs.to_double(args[4])
+            return dv.of_null if [x, x1, y1, x2, y2].any?(&:nil?)
+            return NumericVerbs.numeric_result(y1) if x2 == x1
+
+            result = y1 + ((x - x1) * (y2 - y1) / (x2 - x1))
+            NumericVerbs.numeric_result(result)
           }
 
           registry["weightedAvg"] = ->(args, _ctx) {

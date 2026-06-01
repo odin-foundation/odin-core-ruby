@@ -97,24 +97,22 @@ module Odin
           }
 
           registry["extract"] = ->(args, _ctx) {
-            obj = args[0]
-            keys_arg = args[1]
-            return dv.of_null if obj.nil? || obj.null? || !obj.object?
+            return dv.of_null if args.length < 2
 
-            key_list = if keys_arg&.array?
-                         keys_arg.value.map(&:to_string)
-                       elsif keys_arg&.string?
-                         keys_arg.value.split(",").map(&:strip)
-                       else
-                         []
-                       end
+            s = args[0]&.to_string || ""
+            pattern = args[1]&.to_string || ""
+            group = args.length >= 3 ? (args[2]&.to_number || 0).floor : 0
 
-            result = {}
-            key_list.each do |k|
-              val = obj.get(k)
-              result[k] = val if val
+            begin
+              match = Regexp.new(pattern).match(s)
+            rescue RegexpError
+              return dv.of_null
             end
-            dv.of_object(result)
+            return dv.of_null if match.nil?
+            return dv.of_null if group.negative? || group >= match.size
+
+            captured = match[group]
+            captured.nil? ? dv.of_null : dv.of_string(captured)
           }
         end
       end

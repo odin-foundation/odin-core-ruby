@@ -173,57 +173,89 @@ module Odin
       # ── ODIN Export ──
 
       def self.to_odin(value, header: true, modifiers: {})
-        sb = +""
-
-        if header
-          sb << "{$}\n"
-          sb << "odin = \"1.0.0\"\n"
-        end
+        builder = Odin::Types::OdinDocumentBuilder.new
+        builder.set_metadata("odin", Odin::Types::OdinString.new("1.0.0")) if header
 
         if value.object?
-          entries = value.value
-          has_sections = entries.any? { |_k, v| v.object? || v.array? }
-
-          if has_sections
-            # Check if there are any top-level fields (non-section entries or leaf chains)
-            has_top_level = entries.any? { |_k, v| !v.object? && !v.array? } ||
-                           entries.any? { |_k, v| v.object? && pure_leaf_chain?(v) }
-
-            # Emit {} root section marker when header is present and there are top-level fields
-            sb << "{}\n" if header && has_top_level
-
-            # First pass: flat top-level fields and leaf chains
-            entries.each do |key, val|
-              if val.object?
-                collect_leaf_paths(sb, key, val, key, modifiers)
-              elsif !val.array?
-                write_assignment(sb, key, val, key, modifiers)
-              end
-            end
-
-            # Second pass: sections and arrays
-            last_ctx = +""
-            entries.each do |key, val|
-              if val.object? && !pure_leaf_chain?(val)
-                write_section(sb, key, key, nil, val, modifiers, last_ctx_holder = [last_ctx])
-                last_ctx = last_ctx_holder[0]
-              elsif val.array?
-                write_array_section(sb, key, nil, val.value, modifiers)
-                last_ctx = ""
-              end
-            end
-          else
-            entries.each do |key, val|
-              write_assignment(sb, key, val, key, modifiers)
-            end
-          end
+          flatten_odin_paths(builder, "", value, modifiers)
         elsif value.array?
-          sb << "items = #{format_odin_value(value)}\n"
+          flatten_odin_paths(builder, "items", value, modifiers)
         else
-          sb << "value = #{format_odin_value(value)}\n"
+          builder.set("value", dyn_to_odin_value(value))
         end
 
-        sb
+        Odin.stringify(builder.build, use_headers: true)
+      end
+
+      # Flatten a DynValue tree into path -> Odin value assignments on the builder.
+      def self.flatten_odin_paths(builder, prefix, value, modifiers)
+        if value.object?
+          value.value.each do |key, child|
+            path = prefix.empty? ? key.to_s : "#{prefix}.#{key}"
+            flatten_odin_paths(builder, path, child, modifiers)
+          end
+        elsif value.array?
+          value.value.each_with_index do |child, idx|
+            path = "#{prefix}[#{idx}]"
+            flatten_odin_paths(builder, path, child, modifiers)
+          end
+        else
+          builder.set(prefix, dyn_to_odin_value(value), modifiers: odin_modifiers_for(prefix, modifiers))
+        end
+      end
+
+      # Build the document Modifiers for a path from tracked transform modifiers.
+      def self.odin_modifiers_for(path, modifiers)
+        return nil if modifiers.nil? || !modifiers.key?(path)
+        mods = modifiers[path]
+        return nil if mods.nil? || mods.empty?
+        Odin::Types::OdinModifiers.new(
+          required: mods.include?(:required) || mods.include?(Odin::Transform::FieldModifier::REQUIRED),
+          deprecated: mods.include?(:deprecated) || mods.include?(Odin::Transform::FieldModifier::DEPRECATED),
+          confidential: mods.include?(:confidential) || mods.include?(Odin::Transform::FieldModifier::CONFIDENTIAL)
+        )
+      end
+
+      # Convert a scalar DynValue into the corresponding Odin value, carrying
+      # ECMAScript-style numeric formatting through the raw field.
+      def self.dyn_to_odin_value(dv)
+        case dv.type
+        when :null then Odin::Types::OdinNull.new
+        when :bool then Odin::Types::OdinBoolean.new(dv.value)
+        when :integer then Odin::Types::OdinInteger.new(dv.value)
+        when :float
+          Odin::Types::OdinNumber.new(dv.value, raw: format_double_raw(dv.value))
+        when :float_raw
+          Odin::Types::OdinNumber.new(dv.value.to_f, raw: dv.value.to_s)
+        when :string then Odin::Types::OdinString.new(dv.value)
+        when :currency
+          Odin::Types::OdinCurrency.new(dv.value.to_f, currency_code: dv.currency_code,
+                                                       decimal_places: dv.decimal_places || 2)
+        when :currency_raw
+          Odin::Types::OdinCurrency.new(dv.value.to_f, currency_code: dv.currency_code,
+                                                       decimal_places: dv.decimal_places || 2, raw: dv.value.to_s)
+        when :percent
+          Odin::Types::OdinPercent.new(dv.value, raw: format_percent_raw(dv.value))
+        when :date then Odin::Types::OdinDate.new(dv.value, raw: dv.value.to_s)
+        when :timestamp then Odin::Types::OdinTimestamp.new(dv.value, raw: dv.value.to_s)
+        when :time
+          t = dv.value.to_s
+          Odin::Types::OdinTime.new(t.start_with?("T") ? t : "T#{t}")
+        when :duration then Odin::Types::OdinDuration.new(dv.value.to_s)
+        when :reference then Odin::Types::OdinReference.new(dv.value.to_s)
+        when :binary then Odin::Types::OdinBinary.new(dv.value.to_s)
+        else Odin::Types::OdinString.new(dv.value.to_s)
+        end
+      end
+
+      # ECMAScript number form: whole floats render without a fractional part.
+      def self.format_double_raw(v)
+        return v.to_i.to_s if v.finite? && v == v.to_i && v.abs < 1e15
+        format_double(v)
+      end
+
+      def self.format_percent_raw(v)
+        v == v.to_i.to_f && v.abs < 1e15 ? "#{v.to_i}.0" : v.to_s
       end
 
       # ── Flat KVP Export ──
@@ -314,13 +346,21 @@ module Odin
 
       # ── Private Helpers ──
 
+      # ECMAScript JSON.stringify form: whole-valued finite floats render as
+      # integers; others keep their numeric value.
+      def self.json_number(v)
+        return v unless v.is_a?(Float)
+        return v unless v.finite?
+        v == v.to_i && v.abs < 1e15 ? v.to_i : v
+      end
+
       def self.dynvalue_to_json_obj(dv)
         case dv.type
         when :null then nil
         when :bool then dv.value
         when :integer then dv.value
-        when :float then dv.value
-        when :float_raw then dv.value.to_f
+        when :float then json_number(dv.value)
+        when :float_raw then json_number(dv.value.to_f)
         when :string then dv.value
         when :currency
           f = dv.value.is_a?(BigDecimal) ? dv.value.to_f : dv.value.to_f

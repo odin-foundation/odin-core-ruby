@@ -174,19 +174,19 @@ RSpec.describe "DateTime Verbs" do
   # ── parseTimestamp ──
 
   describe "parseTimestamp" do
-    it "parses ISO timestamp and normalizes to UTC" do
-      result = invoke("parseTimestamp", dv.of_string("2024-03-15T14:30:45.000Z"))
-      expect(result.timestamp?).to be true
-      expect(result.to_string).to eq("2024-03-15T14:30:45.000Z")
+    it "parses a value against a pattern into an ISO timestamp string" do
+      result = invoke("parseTimestamp", dv.of_string("2024-06-15 14:30:45"), dv.of_string("YYYY-MM-DD HH:mm:ss"))
+      expect(result.string?).to be true
+      expect(result.to_string).to eq("2024-06-15T14:30:45")
     end
 
-    it "returns null for empty string" do
-      result = invoke("parseTimestamp", dv.of_string(""))
+    it "returns null with fewer than two arguments" do
+      result = invoke("parseTimestamp", dv.of_string("2024-06-15 14:30:45"))
       expect(result.null?).to be true
     end
 
     it "returns null for null input" do
-      result = invoke("parseTimestamp", dv.of_null)
+      result = invoke("parseTimestamp", dv.of_null, dv.of_string("YYYY-MM-DD HH:mm:ss"))
       expect(result.null?).to be true
     end
   end
@@ -460,7 +460,7 @@ RSpec.describe "DateTime Verbs" do
   describe "startOfMonth" do
     it "returns first day of the month" do
       result = invoke("startOfMonth", dv.of_date("2024-03-15"))
-      expect(result.date?).to be true
+      expect(result.string?).to be true
       expect(result.to_string).to eq("2024-03-01")
     end
 
@@ -480,7 +480,7 @@ RSpec.describe "DateTime Verbs" do
   describe "endOfMonth" do
     it "returns last day of March (31)" do
       result = invoke("endOfMonth", dv.of_date("2024-03-15"))
-      expect(result.date?).to be true
+      expect(result.string?).to be true
       expect(result.to_string).to eq("2024-03-31")
     end
 
@@ -510,7 +510,7 @@ RSpec.describe "DateTime Verbs" do
   describe "startOfYear" do
     it "returns January 1 of the year" do
       result = invoke("startOfYear", dv.of_date("2024-06-15"))
-      expect(result.date?).to be true
+      expect(result.string?).to be true
       expect(result.to_string).to eq("2024-01-01")
     end
 
@@ -525,7 +525,7 @@ RSpec.describe "DateTime Verbs" do
   describe "endOfYear" do
     it "returns December 31 of the year" do
       result = invoke("endOfYear", dv.of_date("2024-06-15"))
-      expect(result.date?).to be true
+      expect(result.string?).to be true
       expect(result.to_string).to eq("2024-12-31")
     end
 

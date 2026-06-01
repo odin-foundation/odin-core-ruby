@@ -154,10 +154,18 @@ RSpec.describe "Aggregation Verbs" do
       expect(result.null?).to be true
     end
 
-    it "returns float type" do
+    it "returns an integer for a whole-valued mean" do
       arr = dv.of_array([dv.of_integer(2), dv.of_integer(4)])
       result = invoke("avg", arr)
+      expect(result.integer?).to be true
+      expect(result.value).to eq(3)
+    end
+
+    it "returns a float for a fractional mean" do
+      arr = dv.of_array([dv.of_integer(2), dv.of_integer(3)])
+      result = invoke("avg", arr)
       expect(result.float?).to be true
+      expect(result.value).to be_within(0.001).of(2.5)
     end
 
     it "skips null values" do

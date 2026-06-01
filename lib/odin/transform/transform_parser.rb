@@ -277,6 +277,9 @@ module Odin
             # Strip trailing comments
             raw_value = strip_comment(raw_value)
 
+            # Section-as-target: {path} = expr assigns to that path's section.
+            key = key[1...-1].strip if key.start_with?("{") && key.end_with?("}")
+
             case current_section_type
             when :header
               header_fields[key] = raw_value
@@ -450,7 +453,7 @@ module Odin
                                else ConfidentialMode::NONE
                                end
 
-        strict_types = unquote(fields["strictTypes"]) == "true"
+        strict_types = unquote(fields["strictTypes"]).to_s.delete_prefix("?") == "true"
 
         source_options = {}
         target_options = {}
@@ -670,6 +673,7 @@ module Odin
         counter_name = inline_counter
         loops = []
         loops << parse_loop_directive(inline_loop) if inline_loop
+        from_source = inline_from
         is_literal = false
         literal_body = nil
 
@@ -686,8 +690,12 @@ module Odin
             discriminator_value = unquote_or_raw(raw_val)
           when "_when"
             when_condition = unquote_or_raw(raw_val)
-          when "_each", "_from"
+          when "_each"
             each_source = unquote_or_raw(raw_val)
+            is_array = true
+          when "_from"
+            from_source = unquote_or_raw(raw_val)
+            each_source = from_source
             is_array = true
           when /\A_loop\d*\z/
             spec = parse_loop_directive(unquote_or_raw(raw_val))
@@ -714,6 +722,16 @@ module Odin
             mapping = parse_field_mapping(key, raw_val)
             field_mappings << mapping
           end
+        end
+
+        # A :from directive supplies the array path for a self-referential
+        # (@ / empty) :loop source.
+        if from_source && !loops.empty?
+          loops.each do |spec|
+            src = spec[:source].to_s
+            spec[:source] = from_source if src.empty? || src == "@"
+          end
+          each_source = loops.first[:source]
         end
 
         SegmentDef.new(

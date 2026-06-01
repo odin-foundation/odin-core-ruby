@@ -102,8 +102,7 @@ module Odin
           registry["formatInteger"] = ->(args, _ctx) {
             raw = NumericVerbs.to_double(args[0])
             return dv.of_null if raw.nil?
-            rounded = NumericVerbs.away_from_zero_round(raw, 0).to_i
-            dv.of_string(rounded.to_s)
+            dv.of_string(raw.floor.to_s)
           }
 
           registry["formatCurrency"] = ->(args, _ctx) {
@@ -198,10 +197,9 @@ module Odin
           }
 
           registry["negate"] = ->(args, _ctx) {
-            v = args[0]
-            n = NumericVerbs.to_double(v)
+            n = NumericVerbs.to_double(args[0])
             return dv.of_null if n.nil?
-            v.integer? ? dv.of_integer(-n.to_i) : dv.of_float(-n)
+            NumericVerbs.numeric_result(-n)
           }
 
           registry["sign"] = ->(args, _ctx) {
@@ -322,7 +320,7 @@ module Odin
             return dv.of_null if v.nil? || v <= 0
             result = Math.log(v)
             return dv.of_null if result.nan? || result.infinite?
-            dv.of_float(result)
+            NumericVerbs.numeric_result(result)
           }
 
           registry["log10"] = ->(args, _ctx) {

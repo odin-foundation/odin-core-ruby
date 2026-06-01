@@ -69,6 +69,34 @@ module Odin
           end
         end
 
+        # Extract date and time components positionally from a pattern, returning
+        # a UTC Time. Recognizes YYYY/YY/MM/DD/HH/mm/ss tokens.
+        def parse_timestamp_with_pattern(value, pattern)
+          pos = ->(pat) { pattern.index(pat) }
+          slice = ->(p, len) { p ? value[p, len]&.to_i : nil }
+
+          yyyy = pos.call("YYYY")
+          yy = pos.call("YY")
+          year = if yyyy
+                   slice.call(yyyy, 4)
+                 elsif yy
+                   2000 + (slice.call(yy, 2) || 0)
+                 end
+          return nil unless year
+
+          month = slice.call(pos.call("MM"), 2) || 1
+          day = slice.call(pos.call("DD"), 2) || 1
+          hour = slice.call(pos.call("HH"), 2) || 0
+          minute = slice.call(pos.call("mm"), 2) || 0
+          second = slice.call(pos.call("ss"), 2) || 0
+
+          begin
+            Time.utc(year, month, day, hour, minute, second)
+          rescue ArgumentError
+            nil
+          end
+        end
+
         def apply_date_pattern(dt, pattern)
           result = pattern.dup
           if dt.is_a?(Date) && !dt.is_a?(Time)
@@ -168,11 +196,16 @@ module Odin
           }
 
           registry["parseTimestamp"] = ->(args, _ctx) {
-            s = args[0]&.to_string
-            return dv.of_null if s.nil? || s.empty?
-            t = DateTimeVerbs.parse_timestamp(s)
+            return dv.of_null if args.length < 2
+
+            value = args[0]&.to_string
+            pattern = args[1]&.to_string
+            return dv.of_null if value.nil? || value.empty? || pattern.nil?
+
+            t = DateTimeVerbs.parse_timestamp_with_pattern(value, pattern)
             return dv.of_null unless t
-            dv.of_timestamp(DateTimeVerbs.format_timestamp_str(t))
+            dv.of_string(format("%04d-%02d-%02dT%02d:%02d:%02d",
+                                t.year, t.month, t.day, t.hour, t.min, t.sec))
           }
 
           registry["addDays"] = ->(args, _ctx) {
@@ -342,7 +375,7 @@ module Odin
             return dv.of_null if v.nil? || v.null?
             d = DateTimeVerbs.parse_date(v)
             return dv.of_null unless d
-            dv.of_date(DateTimeVerbs.format_date_str(Date.new(d.year, d.month, 1)))
+            dv.of_string(DateTimeVerbs.format_date_str(Date.new(d.year, d.month, 1)))
           }
 
           registry["endOfMonth"] = ->(args, _ctx) {
@@ -351,7 +384,7 @@ module Odin
             d = DateTimeVerbs.parse_date(v)
             return dv.of_null unless d
             last = Date.new(d.year, d.month, -1)
-            dv.of_date(DateTimeVerbs.format_date_str(last))
+            dv.of_string(DateTimeVerbs.format_date_str(last))
           }
 
           registry["startOfYear"] = ->(args, _ctx) {
@@ -359,7 +392,7 @@ module Odin
             return dv.of_null if v.nil? || v.null?
             d = DateTimeVerbs.parse_date(v)
             return dv.of_null unless d
-            dv.of_date(DateTimeVerbs.format_date_str(Date.new(d.year, 1, 1)))
+            dv.of_string(DateTimeVerbs.format_date_str(Date.new(d.year, 1, 1)))
           }
 
           registry["endOfYear"] = ->(args, _ctx) {
@@ -367,7 +400,7 @@ module Odin
             return dv.of_null if v.nil? || v.null?
             d = DateTimeVerbs.parse_date(v)
             return dv.of_null unless d
-            dv.of_date(DateTimeVerbs.format_date_str(Date.new(d.year, 12, 31)))
+            dv.of_string(DateTimeVerbs.format_date_str(Date.new(d.year, 12, 31)))
           }
 
           registry["dayOfWeek"] = ->(args, _ctx) {
