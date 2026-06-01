@@ -178,11 +178,8 @@ module Odin
 
       def parse_timestamp(token)
         raw = token.value
-        # Validate the date part
-        m = RE_TIMESTAMP_DATE.match(raw)
-        if m
-          validate_date!("#{m[1]}-#{m[2]}-#{m[3]}", token)
-        end
+        # Validate date portion, time components, and timezone offset
+        validate_timestamp!(raw, token)
         # DateTime.new is much faster than DateTime.parse
         # Try fast path for ISO 8601 timestamps
         dt = fast_parse_timestamp(raw) || DateTime.parse(raw)
@@ -196,6 +193,7 @@ module Odin
       end
 
       def parse_time(token)
+        validate_time!(token.value, token)
         Types::OdinTime.new(token.value)
       end
 
@@ -275,6 +273,58 @@ module Odin
 
       def leap_year?(year)
         (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+      end
+
+      RE_TIMESTAMP_FULL = /\A(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:\d{2})?\z/.freeze
+      RE_TIME_FULL = /\AT(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?\z/.freeze
+
+      # Validate timestamp date portion, time components, and timezone offset.
+      def validate_timestamp!(ts_str, token)
+        m = RE_TIMESTAMP_FULL.match(ts_str)
+        unless m
+          raise_temporal_error(ts_str, token)
+        end
+        validate_date!(m[1], token)
+        validate_time_components!(m[2], m[3], m[4], ts_str, token)
+        offset = m[5]
+        if offset && offset != "Z"
+          off_hour = offset[1, 2].to_i
+          off_min = offset[4, 2].to_i
+          raise_temporal_error(ts_str, token) if off_hour > 23 || off_min > 59
+        end
+      end
+
+      # Validate time-only value: THH:MM[:SS[.sss]].
+      def validate_time!(time_str, token)
+        m = RE_TIME_FULL.match(time_str)
+        unless m
+          raise_temporal_error(time_str, token)
+        end
+        validate_time_components!(m[1], m[2], m[3], time_str, token)
+      end
+
+      # Validate hour/minute/second bounds. Hour 24 only as end-of-day midnight;
+      # second may be 60 (leap second).
+      def validate_time_components!(hour_str, min_str, sec_str, raw_str, token)
+        hour = hour_str.to_i
+        minute = min_str.to_i
+        second = sec_str.nil? ? 0 : sec_str.to_i
+
+        if hour == 24
+          raise_temporal_error(raw_str, token) if minute != 0 || second != 0
+        elsif hour > 23
+          raise_temporal_error(raw_str, token)
+        end
+        raise_temporal_error(raw_str, token) if minute > 59
+        raise_temporal_error(raw_str, token) if second > 60
+      end
+
+      def raise_temporal_error(raw_str, token)
+        raise Errors::ParseError.new(
+          Errors::ParseErrorCode::UNEXPECTED_CHARACTER,
+          token.line, token.column,
+          "Invalid temporal value: #{raw_str}"
+        )
       end
 
       def validate_base64!(data, token)

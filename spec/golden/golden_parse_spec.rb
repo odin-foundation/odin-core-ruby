@@ -41,6 +41,16 @@ RSpec.describe "Golden Parse Tests" do
       doc = Odin.parse(input_text)
       expected = test_case["expected"]
 
+      # Handle computed current-state of a chain (overlay semantics)
+      if expected["current_state"] || expected["currentState"]
+        current = Odin.collapse_chain(input_text)
+        cs = expected["currentState"] || expected["current_state"]
+        assert_assignments(current, cs["assignments"]) if cs["assignments"]
+        assert_current_state_metadata(current, cs["metadata"]) if cs["metadata"]
+        assert_absent(current, cs["absent"]) if cs["absent"]
+        next
+      end
+
       # Handle documents array (chaining tests)
       if expected["documents"]
         docs = Odin.parse_documents(input_text)
@@ -106,6 +116,30 @@ RSpec.describe "Golden Parse Tests" do
       expect(actual).not_to be_nil, "Missing metadata key: #{key}"
       actual_raw = actual.respond_to?(:raw) && actual.raw ? actual.raw : actual.value
       expect(actual_raw.to_s).to eq(expected_value.to_s)
+    end
+  end
+
+  # Current-state metadata: fixture values are raw primitives.
+  def assert_current_state_metadata(doc, expected_metadata)
+    return unless expected_metadata
+    expected_metadata.each do |key, expected_value|
+      actual = doc.metadata[key]
+      expect(actual).not_to be_nil, "Missing current-state metadata key: #{key}"
+      actual_raw = actual.respond_to?(:raw) && actual.raw ? actual.raw : actual.value
+      expect(actual_raw.to_s).to eq(expected_value.to_s)
+    end
+  end
+
+  # Paths asserted absent from current state (assignment or $.metadata).
+  def assert_absent(doc, absent_paths)
+    return unless absent_paths
+    absent_paths.each do |path|
+      if path.start_with?("$.")
+        meta_key = path[2..]
+        expect(doc.metadata[meta_key]).to be_nil, "Expected metadata absent: #{path}"
+      else
+        expect(doc.get(path)).to be_nil, "Expected path absent: #{path}"
+      end
     end
   end
 

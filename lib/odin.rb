@@ -54,6 +54,82 @@ module Odin
       result.respond_to?(:documents) ? result.documents : [result]
     end
 
+    # Collapse a chained ODIN document into its computed current state.
+    #
+    # Later documents overlay earlier ones, a repeated path replaces the earlier
+    # value, +field = ~+ removes the field and its descendants, and +field[] = ~+
+    # clears the array. The result carries the final document's metadata.
+    #
+    # Accepts chained ODIN text or a pre-parsed list of documents.
+    def collapse_chain(input, options = nil)
+      docs = input.is_a?(Array) ? input : parse_documents(input, options)
+      collapse_documents(docs)
+    end
+
+    private
+
+    def collapse_documents(docs)
+      assignments = {}
+      modifiers = {}
+      metadata = {}
+
+      docs.each do |doc|
+        metadata = doc.metadata.dup
+
+        doc.paths.each do |path|
+          value = doc.get(path)
+          next if value.nil?
+
+          if value.type == :null
+            if path.end_with?("[]")
+              clear_array(assignments, modifiers, path[0...-2])
+            else
+              remove_path(assignments, modifiers, path)
+            end
+            next
+          end
+
+          assignments[path] = value
+          mods = doc.modifiers_for(path)
+          if mods
+            modifiers[path] = mods
+          else
+            modifiers.delete(path)
+          end
+        end
+      end
+
+      Types::OdinDocument.new(
+        assignments: assignments,
+        metadata: metadata,
+        modifiers: modifiers,
+        comments: {}
+      )
+    end
+
+    # Remove a path and any nested descendants from the working maps.
+    def remove_path(assignments, modifiers, path)
+      assignments.keys.each do |key|
+        if key == path || key.start_with?("#{path}.") || key.start_with?("#{path}[")
+          assignments.delete(key)
+          modifiers.delete(key)
+        end
+      end
+    end
+
+    # Clear all indexed elements of an array path from the working maps.
+    def clear_array(assignments, modifiers, array_path)
+      prefix = "#{array_path}["
+      assignments.keys.each do |key|
+        if key.start_with?(prefix)
+          assignments.delete(key)
+          modifiers.delete(key)
+        end
+      end
+    end
+
+    public
+
     def stringify(doc, options = {})
       Serialization::Stringify.new(options).stringify(doc)
     end
