@@ -1025,6 +1025,84 @@ module Odin
         items
       end
 
+      # Precompiled :validate / :enum / :range data for a mapping.
+      CompiledValidation = Struct.new(
+        :pattern, :regex, :regex_error,
+        :enum_allowed, :enum_label,
+        :range_str, :range_min, :range_max,
+        keyword_init: true
+      )
+
+      # Per-mapping directive references and flags, derived once from the mapping's
+      # data-independent directives/modifiers and reused across all executions.
+      MappingMods = Struct.new(
+        :if_dir, :unless_dir, :object_dir,
+        :has_default, :has_raw, :has_array,
+        :extraction_dir_names, :required,
+        :validate_dir, :enum_dir, :range_dir,
+        :validation, :validation_active,
+        keyword_init: true
+      )
+
+      # Build (or reuse) the precomputed modifier data for a mapping, memoized on
+      # the mapping object so the directive list is scanned only once.
+      def mapping_mods(mapping)
+        cached = mapping.instance_variable_get(:@__mods)
+        return cached if cached
+
+        directives = mapping.directives
+        validate_dir = directives.find { |d| d.name == "validate" }
+        enum_dir = directives.find { |d| d.name == "enum" }
+        range_dir = directives.find { |d| d.name == "range" }
+
+        mods = MappingMods.new(
+          if_dir: directives.find { |d| d.name == "if" },
+          unless_dir: directives.find { |d| d.name == "unless" },
+          object_dir: directives.find { |d| d.name == "object" },
+          has_default: directives.any? { |d| d.name == "default" },
+          has_raw: directives.any? { |d| d.name == "raw" },
+          has_array: directives.any? { |d| d.name == "array" },
+          extraction_dir_names: directives.map(&:name) & %w[pos len field trim],
+          required: mapping.modifiers.include?(FieldModifier::REQUIRED),
+          validate_dir: validate_dir,
+          enum_dir: enum_dir,
+          range_dir: range_dir,
+          validation: compile_validation(validate_dir, enum_dir, range_dir),
+          validation_active: !validate_dir.nil? || !enum_dir.nil? || !range_dir.nil?
+        )
+        mapping.instance_variable_set(:@__mods, mods)
+        mods
+      end
+
+      # Precompile the regex / enum set / range bounds for validation directives.
+      def compile_validation(validate_dir, enum_dir, range_dir)
+        cv = CompiledValidation.new
+
+        if validate_dir && !validate_dir.value.nil?
+          cv.pattern = validate_dir.value.to_s
+          begin
+            cv.regex = Regexp.new(cv.pattern)
+          rescue RegexpError
+            cv.regex_error = true
+          end
+        end
+
+        if enum_dir && !enum_dir.value.nil?
+          allowed = enum_dir.value.to_s.split(",").map { |v| v.strip.gsub(/\A["']|["']\z/, "") }
+          cv.enum_allowed = allowed
+          cv.enum_label = allowed.join(", ")
+        end
+
+        if range_dir && !range_dir.value.nil?
+          cv.range_str = range_dir.value.to_s
+          parts = cv.range_str.split("..")
+          cv.range_min = (Float(parts[0]) rescue nil)
+          cv.range_max = (Float(parts[1]) rescue nil)
+        end
+
+        cv
+      end
+
       def process_mapping(mapping, source, context, output, modifier_prefix: "")
         target = mapping.target_field
 
@@ -1041,22 +1119,24 @@ module Odin
         return if target.start_with?("_")
 
         begin
+          mods = mapping_mods(mapping)
+
           # Field-level :if / :unless gate the assignment on a comparison expression.
-          if_dir = mapping.directives.find { |d| d.name == "if" }
+          if_dir = mods.if_dir
           if if_dir
             return unless evaluate_condition(if_dir.value.to_s, source, context)
           end
-          unless_dir = mapping.directives.find { |d| d.name == "unless" }
+          unless_dir = mods.unless_dir
           if unless_dir
             return if evaluate_condition(unless_dir.value.to_s, source, context)
           end
 
           # A :default modifier handles a missing lookup; suppress errors raised during evaluation.
-          has_default = mapping.directives.any? { |d| d.name == "default" }
+          has_default = mods.has_default
           errors_before = has_default ? context.errors.length : 0
 
           # :object builds a nested object from an inline {key = @path, …} spec.
-          object_dir = mapping.directives.find { |d| d.name == "object" }
+          object_dir = mods.object_dir
           if object_dir
             val = build_inline_object(object_dir.value.to_s, context)
           else
@@ -1101,19 +1181,19 @@ module Odin
           return unless validate_field_value(val, mapping, context)
 
           # :raw emits inline JSON structurally instead of an escaped string.
-          if mapping.directives.any? { |d| d.name == "raw" }
+          if mods.has_raw
             val = parse_raw_json_value(val)
           end
 
           # :array wraps the value in a single-element array.
-          if mapping.directives.any? { |d| d.name == "array" }
+          if mods.has_array
             val = Types::DynValue.of_array([val.is_a?(Types::DynValue) ? val : Types::DynValue.from_ruby(val)])
           end
 
           # Missing source path: a :required field always fails (T005); an ordinary
           # field honors the onMissing policy (fail -> T005, warn -> warning,
           # skip/default -> keep null). A path that is merely null is not "missing".
-          required = mapping.modifiers.include?(FieldModifier::REQUIRED)
+          required = mods.required
           val_null = val.is_a?(Types::DynValue) && val.null?
           if val_null && copy_source_absent?(mapping, source, context)
             raw_path = mapping.expression.is_a?(CopyExpr) ? mapping.expression.source_path : target
@@ -2129,38 +2209,30 @@ module Odin
       def validate_field_value(val, mapping, context)
         return true if val.is_a?(Types::DynValue) && val.null?
 
+        cv = mapping_mods(mapping).validation
         policy = context.on_validation || "fail"
         failures = []
 
-        validate_dir = mapping.directives.find { |d| d.name == "validate" }
-        if validate_dir && !validate_dir.value.nil?
-          pattern = validate_dir.value.to_s
+        if cv.pattern
           str = dynvalue_string(val)
-          begin
-            failures << "value '#{str}' does not match pattern '#{pattern}'" unless Regexp.new(pattern).match?(str)
-          rescue RegexpError
-            failures << "invalid validation pattern '#{pattern}'"
+          if cv.regex_error
+            failures << "invalid validation pattern '#{cv.pattern}'"
+          elsif !cv.regex.match?(str)
+            failures << "value '#{str}' does not match pattern '#{cv.pattern}'"
           end
         end
 
-        enum_dir = mapping.directives.find { |d| d.name == "enum" }
-        if enum_dir && !enum_dir.value.nil?
-          allowed = enum_dir.value.to_s.split(",").map { |v| v.strip.gsub(/\A["']|["']\z/, "") }
+        if cv.enum_allowed
           str = dynvalue_string(val)
-          failures << "value '#{str}' is not one of [#{allowed.join(', ')}]" unless allowed.include?(str)
+          failures << "value '#{str}' is not one of [#{cv.enum_label}]" unless cv.enum_allowed.include?(str)
         end
 
-        range_dir = mapping.directives.find { |d| d.name == "range" }
-        if range_dir && !range_dir.value.nil?
-          range_str = range_dir.value.to_s
-          parts = range_str.split("..")
-          min = Float(parts[0]) rescue nil
-          max = Float(parts[1]) rescue nil
+        if cv.range_str
           num = numeric_of(val)
           if num.nil?
-            failures << "value '#{dynvalue_string(val)}' is not numeric for range #{range_str}"
-          elsif (min && num < min) || (max && num > max)
-            failures << "value #{num} is outside range #{range_str}"
+            failures << "value '#{dynvalue_string(val)}' is not numeric for range #{cv.range_str}"
+          elsif (cv.range_min && num < cv.range_min) || (cv.range_max && num > cv.range_max)
+            failures << "value #{num} is outside range #{cv.range_str}"
           end
         end
 

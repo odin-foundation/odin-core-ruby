@@ -53,19 +53,47 @@ module Odin
         # V011: Unknown fields (strict mode)
         check_unknown_fields if @strict
 
-        # V012: Circular references
+        # V012: Circular references (document-level)
         check_circular_references
 
-        # V013: Unresolved references
+        # V013: Unresolved references (document-level)
         check_unresolved_references
 
-        # V017: Schema-definition well-formedness
-        check_schema_definition
+        # Schema-only checks (V012 type cycles, V013 type refs, V017 well-formedness)
+        # are computed once per schema and reused across documents.
+        @errors.concat(schema_only_errors.map(&:dup))
 
         Errors::ValidationResult.new(@errors)
       end
 
       private
+
+      # Cached schema-only error arrays keyed by schema object_id. Each entry pins
+      # the schema and registry to verify identity on hit and keep them alive.
+      SCHEMA_ONLY_CACHE = {}
+
+      # Schema-level errors independent of any document: type-reference resolution
+      # (V013), schema type cycles (V012), and schema-definition well-formedness
+      # (V017). Computed once per (schema, registry) and reused; callers append
+      # dup'd copies so the cached array is never mutated.
+      def schema_only_errors
+        cached = SCHEMA_ONLY_CACHE[@schema.object_id]
+        if cached && cached[:schema].equal?(@schema) && cached[:registry].equal?(@registry)
+          return cached[:errors]
+        end
+
+        saved_errors = @errors
+        @errors = []
+        check_schema_type_cycles
+        check_schema_type_references
+        check_schema_definition
+        computed = @errors
+        @errors = saved_errors
+
+        SCHEMA_ONLY_CACHE[@schema.object_id] =
+          { schema: @schema, registry: @registry, errors: computed }
+        computed
+      end
 
       def add_error(code:, path:, message:, expected: nil, actual: nil)
         @errors << Errors::ValidationError.new(
@@ -459,13 +487,37 @@ module Odin
 
       # ── V004: Pattern mismatch ──
 
+      # Compiled pattern constraints keyed by pattern source. Each entry holds the
+      # ReDoS safety result and the compiled Regexp (or the compile error), so a
+      # distinct pattern is checked and compiled only once across all documents.
+      COMPILED_PATTERN_CACHE = {}
+
+      # Resolve a pattern string to { safe:, regex:, error: }, compiling once.
+      def compiled_pattern(pattern)
+        COMPILED_PATTERN_CACHE.fetch(pattern) do
+          entry =
+            if ReDoSProtection.safe?(pattern)
+              begin
+                { safe: true, regex: Regexp.new(pattern), error: nil }
+              rescue RegexpError => e
+                { safe: true, regex: nil, error: e }
+              end
+            else
+              { safe: false, regex: nil, error: nil }
+            end
+          COMPILED_PATTERN_CACHE[pattern] = entry
+        end
+      end
+
       def check_pattern_constraints
         each_schema_field_with_constraints(:pattern) do |path, field, value, constraint|
           next if value.nil? || value.null?
           next unless value.string?
 
+          compiled = compiled_pattern(constraint.pattern)
+
           # ReDoS check
-          unless ReDoSProtection.safe?(constraint.pattern)
+          unless compiled[:safe]
             add_error(
               code: Errors::ValidationErrorCode::PATTERN_MISMATCH,
               path: path,
@@ -474,8 +526,17 @@ module Odin
             next
           end
 
+          if compiled[:error]
+            add_error(
+              code: Errors::ValidationErrorCode::PATTERN_MISMATCH,
+              path: path,
+              message: "Invalid regex pattern: #{compiled[:error].message} at '#{path}'"
+            )
+            next
+          end
+
           begin
-            regex = Regexp.new(constraint.pattern)
+            regex = compiled[:regex]
             result = ReDoSProtection.safe_test(regex, value.value)
             if result[:reason] == :value_too_long
               add_error(
@@ -850,9 +911,6 @@ module Odin
           visited = Set.new([path])
           check_ref_cycle(value.path, visited, path)
         end
-
-        # Check schema-level type reference cycles
-        check_schema_type_cycles
       end
 
       def check_ref_cycle(ref_path, visited, origin_path)
@@ -929,8 +987,11 @@ module Odin
             )
           end
         end
+      end
 
-        # Also check type references in schema
+      # Schema-only: type references in schema fields (V013). Independent of the
+      # document; resolved through the registry and local types.
+      def check_schema_type_references
         @schema.fields.each do |path, field|
           next unless field.type_ref
           check_type_reference(path, field.type_ref)

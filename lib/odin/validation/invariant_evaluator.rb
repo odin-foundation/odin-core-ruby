@@ -14,6 +14,9 @@ module Odin
     #   multiplicative = unary , { ( "*" | "/" | "%" ) , unary }
     #   unary          = [ "!" ] , primary
     #   primary        = path | number | string | "(" , expression , ")"
+    #
+    # An expression is parsed to an AST once and cached by its source string; each
+    # document validation evaluates the cached AST against that document's values.
     class InvariantEvaluator
       EPSILON = 1e-9
       MULTI_CHAR_OPS = %w[== != >= <= && ||].freeze
@@ -23,6 +26,21 @@ module Odin
       ParseError = Class.new(StandardError)
 
       Token = Struct.new(:kind, :text)
+
+      # AST nodes. Each carries its operator/value; document values bind at eval time.
+      Num = Struct.new(:value)
+      Str = Struct.new(:value)
+      Bool = Struct.new(:value)
+      Field = Struct.new(:name)
+      Not = Struct.new(:operand)
+      Logic = Struct.new(:op, :left, :right)
+      Equality = Struct.new(:op, :left, :right)
+      Compare = Struct.new(:op, :left, :right)
+      Additive = Struct.new(:op, :left, :right)
+      Multiplicative = Struct.new(:op, :left, :right)
+
+      # Compiled, document-independent invariant ASTs keyed by source string.
+      AST_CACHE = {}
 
       # Result of evaluating an expression.
       #   value:        true/false when evaluable; nil when an operand is absent.
@@ -35,13 +53,11 @@ module Odin
       end
 
       def evaluate(expr)
-        @tokens = tokenize(expr)
-        @pos = 0
+        ast = self.class.parse(expr)
         @absent_operand = false
         @null_operand = false
 
-        final = parse_expression
-        raise ParseError, "Unexpected trailing tokens" unless peek.nil?
+        final = eval_node(ast)
 
         result =
           if @null_operand
@@ -55,191 +71,211 @@ module Odin
         Result.new(result, @null_operand)
       end
 
+      # Return the cached AST for an expression, parsing on first use.
+      def self.parse(expr)
+        AST_CACHE.fetch(expr) do
+          AST_CACHE[expr] = Parser.new(expr).parse
+        end
+      end
+
+      # Parses an expression string to an AST. Document-independent.
+      class Parser
+        def initialize(expr)
+          @tokens = tokenize(expr)
+          @pos = 0
+        end
+
+        def parse
+          ast = parse_expression
+          raise ParseError, "Unexpected trailing tokens" unless peek.nil?
+
+          ast
+        end
+
+        private
+
+        def tokenize(expr)
+          tokens = []
+          i = 0
+          while i < expr.length
+            c = expr[i]
+            if c == " " || c == "\t"
+              i += 1
+              next
+            end
+            if c == "("
+              tokens << Token.new(:lparen, "(")
+              i += 1
+              next
+            end
+            if c == ")"
+              tokens << Token.new(:rparen, ")")
+              i += 1
+              next
+            end
+            if c == '"' || c == "'"
+              quote = c
+              j = i + 1
+              text = +""
+              while j < expr.length && expr[j] != quote
+                text << expr[j]
+                j += 1
+              end
+              raise ParseError, "Unterminated string literal" if j >= expr.length
+
+              tokens << Token.new(:string, text)
+              i = j + 1
+              next
+            end
+            two = expr[i, 2]
+            if MULTI_CHAR_OPS.include?(two)
+              tokens << Token.new(:op, two)
+              i += 2
+              next
+            end
+            if SINGLE_CHAR_OPS.include?(c)
+              tokens << Token.new(:op, c)
+              i += 1
+              next
+            end
+            if c >= "0" && c <= "9"
+              j = i
+              j += 1 while j < expr.length && expr[j].match?(/[0-9.]/)
+              tokens << Token.new(:number, expr[i...j])
+              i = j
+              next
+            end
+            if c.match?(/[A-Za-z_]/)
+              j = i
+              j += 1 while j < expr.length && expr[j].match?(/[A-Za-z0-9_.]/)
+              tokens << Token.new(:ident, expr[i...j])
+              i = j
+              next
+            end
+            raise ParseError, "Unexpected character '#{c}' in invariant expression"
+          end
+          tokens
+        end
+
+        def peek
+          @tokens[@pos]
+        end
+
+        def advance
+          tok = @tokens[@pos]
+          @pos += 1
+          tok
+        end
+
+        def parse_expression
+          parse_logic_or
+        end
+
+        def parse_logic_or
+          left = parse_logic_and
+          while peek&.text == "||"
+            advance
+            right = parse_logic_and
+            left = Logic.new("||", left, right)
+          end
+          left
+        end
+
+        def parse_logic_and
+          left = parse_equality
+          while peek&.text == "&&"
+            advance
+            right = parse_equality
+            left = Logic.new("&&", left, right)
+          end
+          left
+        end
+
+        def parse_equality
+          left = parse_comparison
+          while %w[== != =].include?(peek&.text)
+            op = advance.text
+            right = parse_comparison
+            left = Equality.new(op, left, right)
+          end
+          left
+        end
+
+        def parse_comparison
+          left = parse_additive
+          while %w[> < >= <=].include?(peek&.text)
+            op = advance.text
+            right = parse_additive
+            left = Compare.new(op, left, right)
+          end
+          left
+        end
+
+        def parse_additive
+          left = parse_multiplicative
+          while %w[+ -].include?(peek&.text)
+            op = advance.text
+            right = parse_multiplicative
+            left = Additive.new(op, left, right)
+          end
+          left
+        end
+
+        def parse_multiplicative
+          left = parse_unary
+          while %w[* / %].include?(peek&.text)
+            op = advance.text
+            right = parse_unary
+            left = Multiplicative.new(op, left, right)
+          end
+          left
+        end
+
+        def parse_unary
+          if peek&.text == "!"
+            advance
+            operand = parse_unary
+            return Not.new(operand)
+          end
+          parse_primary
+        end
+
+        def parse_primary
+          tok = advance
+          raise ParseError, "Unexpected end of invariant expression" if tok.nil?
+
+          case tok.kind
+          when :lparen
+            inner = parse_expression
+            close = advance
+            raise ParseError, "Expected closing parenthesis" if close.nil? || close.kind != :rparen
+
+            inner
+          when :number
+            Num.new(Float(tok.text))
+          when :string
+            Str.new(tok.text)
+          when :ident
+            return Bool.new(BOOLEAN_LITERALS[tok.text]) if BOOLEAN_LITERALS.key?(tok.text)
+
+            Field.new(tok.text)
+          else
+            raise ParseError, "Unexpected token '#{tok.text}'"
+          end
+        rescue ArgumentError, TypeError
+          raise ParseError, "Invalid number"
+        end
+      end
+
       private
 
-      def tokenize(expr)
-        tokens = []
-        i = 0
-        while i < expr.length
-          c = expr[i]
-          if c == " " || c == "\t"
-            i += 1
-            next
-          end
-          if c == "("
-            tokens << Token.new(:lparen, "(")
-            i += 1
-            next
-          end
-          if c == ")"
-            tokens << Token.new(:rparen, ")")
-            i += 1
-            next
-          end
-          if c == '"' || c == "'"
-            quote = c
-            j = i + 1
-            text = +""
-            while j < expr.length && expr[j] != quote
-              text << expr[j]
-              j += 1
-            end
-            raise ParseError, "Unterminated string literal" if j >= expr.length
-
-            tokens << Token.new(:string, text)
-            i = j + 1
-            next
-          end
-          two = expr[i, 2]
-          if MULTI_CHAR_OPS.include?(two)
-            tokens << Token.new(:op, two)
-            i += 2
-            next
-          end
-          if SINGLE_CHAR_OPS.include?(c)
-            tokens << Token.new(:op, c)
-            i += 1
-            next
-          end
-          if c >= "0" && c <= "9"
-            j = i
-            j += 1 while j < expr.length && expr[j].match?(/[0-9.]/)
-            tokens << Token.new(:number, expr[i...j])
-            i = j
-            next
-          end
-          if c.match?(/[A-Za-z_]/)
-            j = i
-            j += 1 while j < expr.length && expr[j].match?(/[A-Za-z0-9_.]/)
-            tokens << Token.new(:ident, expr[i...j])
-            i = j
-            next
-          end
-          raise ParseError, "Unexpected character '#{c}' in invariant expression"
-        end
-        tokens
-      end
-
-      def peek
-        @tokens[@pos]
-      end
-
-      def advance
-        tok = @tokens[@pos]
-        @pos += 1
-        tok
-      end
-
-      def parse_expression
-        parse_logic_or
-      end
-
-      def parse_logic_or
-        left = parse_logic_and
-        while peek&.text == "||"
-          advance
-          right = parse_logic_and
-          left = to_bool(left) || to_bool(right)
-        end
-        left
-      end
-
-      def parse_logic_and
-        left = parse_equality
-        while peek&.text == "&&"
-          advance
-          right = parse_equality
-          left = to_bool(left) && to_bool(right)
-        end
-        left
-      end
-
-      def parse_equality
-        left = parse_comparison
-        while %w[== != =].include?(peek&.text)
-          op = advance.text
-          right = parse_comparison
-          eq = loose_equals(left, right)
-          left = op == "!=" ? !eq : eq
-        end
-        left
-      end
-
-      def parse_comparison
-        left = parse_additive
-        while %w[> < >= <=].include?(peek&.text)
-          op = advance.text
-          right = parse_additive
-          left = compare(left, op, right)
-        end
-        left
-      end
-
-      def parse_additive
-        left = parse_multiplicative
-        while %w[+ -].include?(peek&.text)
-          op = advance.text
-          right = parse_multiplicative
-          ln = to_num(left)
-          rn = to_num(right)
-          left = if ln.nil? || rn.nil?
-                   Float::NAN
-                 else
-                   op == "+" ? ln + rn : ln - rn
-                 end
-        end
-        left
-      end
-
-      def parse_multiplicative
-        left = parse_unary
-        while %w[* / %].include?(peek&.text)
-          op = advance.text
-          right = parse_unary
-          ln = to_num(left)
-          rn = to_num(right)
-          left = if ln.nil? || rn.nil?
-                   Float::NAN
-                 elsif op == "*"
-                   ln * rn
-                 elsif op == "/"
-                   rn.zero? ? Float::NAN : ln / rn
-                 else
-                   rn.zero? ? Float::NAN : ln % rn
-                 end
-        end
-        left
-      end
-
-      def parse_unary
-        if peek&.text == "!"
-          advance
-          operand = parse_unary
-          return !to_bool(operand)
-        end
-        parse_primary
-      end
-
-      def parse_primary
-        tok = advance
-        raise ParseError, "Unexpected end of invariant expression" if tok.nil?
-
-        case tok.kind
-        when :lparen
-          inner = parse_expression
-          close = advance
-          raise ParseError, "Expected closing parenthesis" if close.nil? || close.kind != :rparen
-
-          inner
-        when :number
-          n = Float(tok.text)
-          n
-        when :string
-          tok.text
-        when :ident
-          return BOOLEAN_LITERALS[tok.text] if BOOLEAN_LITERALS.key?(tok.text)
-
-          value = @resolve.call(tok.text)
+      def eval_node(node)
+        case node
+        when Num then node.value
+        when Str then node.value
+        when Bool then node.value
+        when Field
+          value = @resolve.call(node.name)
           if value.nil?
             @absent_operand = true
             return Float::NAN
@@ -249,11 +285,40 @@ module Odin
             return nil
           end
           operand_from_value(value)
-        else
-          raise ParseError, "Unexpected token '#{tok.text}'"
+        when Not
+          !to_bool(eval_node(node.operand))
+        when Logic
+          left = eval_node(node.left)
+          right = eval_node(node.right)
+          node.op == "||" ? to_bool(left) || to_bool(right) : to_bool(left) && to_bool(right)
+        when Equality
+          left = eval_node(node.left)
+          right = eval_node(node.right)
+          eq = loose_equals(left, right)
+          node.op == "!=" ? !eq : eq
+        when Compare
+          compare(eval_node(node.left), node.op, eval_node(node.right))
+        when Additive
+          ln = to_num(eval_node(node.left))
+          rn = to_num(eval_node(node.right))
+          if ln.nil? || rn.nil?
+            Float::NAN
+          else
+            node.op == "+" ? ln + rn : ln - rn
+          end
+        when Multiplicative
+          ln = to_num(eval_node(node.left))
+          rn = to_num(eval_node(node.right))
+          if ln.nil? || rn.nil?
+            Float::NAN
+          elsif node.op == "*"
+            ln * rn
+          elsif node.op == "/"
+            rn.zero? ? Float::NAN : ln / rn
+          else
+            rn.zero? ? Float::NAN : ln % rn
+          end
         end
-      rescue ArgumentError, TypeError
-        raise ParseError, "Invalid number"
       end
 
       def operand_from_value(value)
