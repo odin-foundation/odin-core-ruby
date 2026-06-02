@@ -39,6 +39,7 @@ require_relative "odin/transform/verbs/aggregation_verbs"
 require_relative "odin/transform/verbs/object_verbs"
 require_relative "odin/transform/verbs/geo_verbs"
 require_relative "odin/export"
+require_relative "odin/forms"
 
 module Odin
   class << self
