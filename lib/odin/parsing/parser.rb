@@ -52,7 +52,7 @@ module Odin
             break
           when TokenType::NEWLINE
             @pos += 1
-            # Blank line after {$} metadata exits metadata mode (Java parity)
+            # Blank line after {$} metadata exits metadata mode
             if @metadata_mode && @context.empty?
               nt = @tokens[@pos]
               if nt && nt.type == TokenType::NEWLINE

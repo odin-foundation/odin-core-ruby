@@ -1189,7 +1189,7 @@ module Odin
             next # Non-string, non-temporal values skip format checks
           end
 
-          # date-iso: validate against YYYY-MM-DD pattern (matches TypeScript)
+          # date-iso: validate against YYYY-MM-DD pattern
           if constraint.format_name == "date-iso"
             unless val_str.match?(/\A\d{4}-\d{2}-\d{2}\z/)
               add_error(

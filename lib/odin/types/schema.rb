@@ -2,7 +2,7 @@
 
 module Odin
   module Types
-    # Schema field type identifiers matching TS/Java SchemaFieldType
+    # Schema field type identifiers
     module SchemaFieldType
       STRING    = :string
       INTEGER   = :integer

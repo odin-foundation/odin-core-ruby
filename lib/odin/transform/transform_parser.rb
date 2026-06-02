@@ -790,7 +790,7 @@ module Odin
         end
 
         # Collect extraction directives from CopyExpr into field mapping directives
-        # (TypeScript parity: directives appear on BOTH CopyExpr and FieldMapping)
+        # (directives appear on BOTH CopyExpr and FieldMapping)
         collect_expr_directives(expr, remaining_directives)
 
         FieldMapping.new(

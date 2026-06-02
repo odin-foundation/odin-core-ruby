@@ -457,7 +457,7 @@ module Odin
         is_array_field = field_name.end_with?("[]")
         field_name = field_name[0...-2] if is_array_field
 
-        # Unquote the value (Java does this before metadata check)
+        # Unquote the value before the metadata check
         if right.length >= 2 && right[0] == '"' && right[-1] == '"'
           right = right[1...-1]
         end

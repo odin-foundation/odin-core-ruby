@@ -336,7 +336,7 @@ module Odin
           fields["_text"] = Types::DynValue.of_string(text) unless text.empty?
         end
 
-        # Child elements — use qualified names (with namespace prefix) to match Java behavior
+        # Child elements — use qualified names (with namespace prefix)
         child_counts = Hash.new(0)
         children.each { |c| child_counts[qualified_name(c)] += 1 }
 
@@ -345,7 +345,7 @@ module Odin
           name = qualified_name(child)
           child_val = parse_xml_element(child, depth + 1)
 
-          # Elements named 'item' are always treated as arrays (matches TypeScript)
+          # Elements named 'item' are always treated as arrays
           if child_counts[name] > 1 || name == "item"
             child_arrays[name] ||= []
             child_arrays[name] << child_val

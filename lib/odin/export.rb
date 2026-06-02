@@ -17,7 +17,7 @@ module Odin
 
     # Convert OdinDocument to XML string
     def self.to_xml(doc, root: "root", preserve_types: false, preserve_modifiers: false)
-      # When preserving modifiers, always preserve types too (matches Java behavior)
+      # When preserving modifiers, always preserve types too
       preserve_types = true if preserve_modifiers
 
       xml = +%{<?xml version="1.0" encoding="UTF-8"?>\n}

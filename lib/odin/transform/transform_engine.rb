@@ -456,9 +456,8 @@ module Odin
         end
       end
 
-      # Emulate JavaScript's signed 32-bit right shift (>>).
-      # Ruby integers are arbitrary precision and always do logical (unsigned) shift,
-      # but JS >> sign-extends from bit 31.
+      # Signed 32-bit right shift (>>) with sign-extension from bit 31.
+      # Ruby integers are arbitrary precision and always do logical (unsigned) shift.
       def js_signed_rshift(val, shift)
         val = val & 0xFFFFFFFF
         val -= 0x100000000 if val >= 0x80000000
@@ -2384,7 +2383,7 @@ module Odin
         end
       end
 
-      # Format output as fixed-width text (segment-based, matching TypeScript)
+      # Format output as fixed-width text (segment-based)
       def format_fixed_width_output(output_dv, transform_def, context = nil)
         lw = transform_def.header.target_options["lineWidth"]
         has_line_width = !lw.nil? && parse_target_int(lw, 0) > 0
@@ -2571,7 +2570,7 @@ module Odin
         line
       end
 
-      # ── XML Output Formatting (segment-based, matching TypeScript) ──
+      # ── XML Output Formatting (segment-based) ──
 
       def format_xml_output(output_dv, transform_def, context)
         topts = transform_def.header.target_options
@@ -3752,7 +3751,7 @@ module Odin
                    end
 
           if seed_arg
-            # Deterministic UUID from seed — matches TypeScript's exact algorithm
+            # Deterministic UUID from seed
             hash1 = 5381
             hash2 = 52711
             seed_arg.each_byte do |c|

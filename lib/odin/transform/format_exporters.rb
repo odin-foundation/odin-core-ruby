@@ -410,7 +410,7 @@ module Odin
 
       # ── ODIN formatting helpers ──
 
-      # Section writing (matches Java OdinFormatter.writeSection)
+      # Section writing
       def self.write_section(sb, full_path, display_path, parent_section, val, modifiers, last_ctx, inside_relative: false)
         entries = val.value
         return unless entries.is_a?(Hash)
@@ -454,7 +454,7 @@ module Odin
         end
       end
 
-      # Array section writing (matches Java OdinFormatter.writeArraySection)
+      # Array section writing
       def self.write_array_section(sb, name, parent_section, items, modifiers)
         prefix = parent_section ? "." : ""
 
@@ -569,7 +569,7 @@ module Odin
         result
       end
 
-      # Leaf chain detection (matches Java isPureLeafChain)
+      # Leaf chain detection
       def self.pure_leaf_chain?(val)
         return false unless val.object?
         entries = val.value
@@ -580,7 +580,7 @@ module Odin
         true
       end
 
-      # Collect leaf paths for flat nested objects (matches Java collectLeafPaths)
+      # Collect leaf paths for flat nested objects
       def self.collect_leaf_paths(sb, prefix, val, mod_path, modifiers)
         return unless pure_leaf_chain?(val)
         collect_leaf_paths_inner(sb, prefix, val, mod_path, modifiers)

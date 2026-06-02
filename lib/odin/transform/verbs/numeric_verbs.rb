@@ -5,7 +5,7 @@ require "bigdecimal"
 module Odin
   module Transform
     module Verbs
-      # Mulberry32 PRNG — matches TypeScript/Rust implementations
+      # Mulberry32 seeded PRNG
       class Mulberry32
         def initialize(seed)
           @state = seed & 0xFFFFFFFF

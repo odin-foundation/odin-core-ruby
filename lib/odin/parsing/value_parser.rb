@@ -73,7 +73,7 @@ module Odin
           )
         end
         val = fval.to_i
-        # Beyond JS safe integer range, store raw
+        # Beyond the 2^53-1 safe integer range, store raw
         safe = val.abs <= 9_007_199_254_740_991
         Types::OdinInteger.new(val, raw: safe && raw.length <= 15 ? nil : raw)
       rescue ArgumentError
