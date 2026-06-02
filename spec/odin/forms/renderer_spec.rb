@@ -122,6 +122,6 @@ RSpec.describe Odin::Forms::Renderer do
   end
 
   def forms_fixtures_dir
-    File.join(find_golden_dir, "forms", "fixtures")
+    File.join(__dir__, "fixtures")
   end
 end
