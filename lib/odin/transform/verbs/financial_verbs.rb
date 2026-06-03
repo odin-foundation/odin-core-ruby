@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "bigdecimal"
+require "date"
 
 module Odin
   module Transform
@@ -374,6 +375,69 @@ module Odin
             end
             dv.of_array(result)
           }
+
+          registry["xnpv"] = ->(args, _ctx) {
+            return dv.of_null if args.length < 3
+            rate = NumericVerbs.to_double(args[0])
+            amounts = FinancialVerbs.numeric_array(args[1])
+            days = FinancialVerbs.day_array(args[2])
+            return dv.of_null if rate.nil? || amounts.nil? || days.nil?
+            return dv.of_null if amounts.empty? || amounts.length != days.length
+            return dv.of_null if amounts.any? { |a| a.nil? } || days.any? { |d| d.nil? }
+            d0 = days[0]
+            total = 0.0
+            amounts.each_index { |i| total += amounts[i] / ((1.0 + rate)**((days[i] - d0) / 365.0)) }
+            FinancialVerbs.safe_result(total)
+          }
+
+          registry["xirr"] = ->(args, _ctx) {
+            return dv.of_null if args.length < 2
+            amounts = FinancialVerbs.numeric_array(args[0])
+            days = FinancialVerbs.day_array(args[1])
+            return dv.of_null if amounts.nil? || days.nil?
+            return dv.of_null if amounts.length < 2 || amounts.length != days.length
+            return dv.of_null if amounts.any? { |a| a.nil? } || days.any? { |d| d.nil? }
+            rate = args.length >= 3 ? (NumericVerbs.to_double(args[2]) || 0.1) : 0.1
+            d0 = days[0]
+            100.times do
+              value = 0.0
+              derivative = 0.0
+              amounts.each_index do |j|
+                exp = (days[j] - d0) / 365.0
+                value += amounts[j] / ((1.0 + rate)**exp)
+                derivative -= (exp * amounts[j]) / ((1.0 + rate)**(exp + 1))
+              end
+              return FinancialVerbs.safe_result(rate) if value.abs < 1e-7
+              return dv.of_null if derivative.abs < 1e-12
+              nxt = rate - value / derivative
+              return dv.of_null if nxt.nan? || nxt.infinite? || nxt <= -1
+              rate = nxt
+            end
+            dv.of_null
+          }
+        end
+
+        # Extract an array of floats, returning nil when not array-like.
+        def numeric_array(v)
+          return nil unless v&.array? || v&.string?
+          CollectionVerbs.extract_items(v).map { |item| NumericVerbs.to_double(item) }
+        end
+
+        # Extract an array of epoch-day numbers from dates or numbers.
+        def day_array(v)
+          return nil unless v&.array? || v&.string?
+          CollectionVerbs.extract_items(v).map { |item| to_days(item) }
+        end
+
+        def to_days(item)
+          return nil unless item.is_a?(Types::DynValue)
+          return NumericVerbs.to_double(item) if item.numeric?
+          s = item.to_string
+          begin
+            (Date.parse(s) - Date.new(1970, 1, 1)).to_i
+          rescue StandardError
+            nil
+          end
         end
       end
     end

@@ -71,6 +71,20 @@ module Odin
         "has" => 2, "merge" => 2, "jsonPath" => 2,
         "assert" => 2,
         "formatPhone" => 2, "movingAvg" => 2, "businessDays" => 2,
+        "fromEntries" => 1, "invert" => 1, "defaults" => 2, "renameKeys" => 2,
+        "compactObject" => 1,
+        "intersection" => 2, "union" => 2, "difference" => 2,
+        "symmetricDifference" => 2, "countBy" => 2, "keyBy" => 2,
+        "explode" => 2, "window" => 2,
+        "base64urlEncode" => 1, "base64urlDecode" => 1, "hmac" => 3,
+        "parseUrl" => 1, "buildUrl" => 1, "parseQuery" => 1, "buildQuery" => 1,
+        "stableStringify" => 1, "canonicalHash" => 1,
+        "escapeHtml" => 1, "unescapeHtml" => 1, "escapeXml" => 1, "stripTags" => 1,
+        "template" => 2,
+        "gcd" => 2, "lcm" => 2, "factorial" => 1,
+        "expr" => 2,
+        "countIf" => 4, "sumIf" => 5, "avgIf" => 5,
+        "xnpv" => 3, "xirr" => 3,
 
         # Arity 3
         "ifElse" => 3, "between" => 3,
@@ -100,7 +114,7 @@ module Odin
       }.freeze
 
       VARIADIC_VERBS = %w[
-        concat coalesce cond switch lookup lookupDefault minOf maxOf
+        concat coalesce cond switch lookup lookupDefault minOf maxOf pick omit
       ].freeze
 
       ALL_DIRECTIVES = %w[
@@ -717,8 +731,9 @@ module Odin
           when "_literalBody"
             literal_body = raw_val
           else
-            next if key.start_with?("_") && key != "_"
-
+            # An unrecognized `_`-prefixed field is a computation-only sink:
+            # it runs for side effects but is not emitted. Recognized loop
+            # directives are handled above; these flow through as mappings.
             mapping = parse_field_mapping(key, raw_val)
             field_mappings << mapping
           end
@@ -1047,6 +1062,11 @@ module Odin
           verb_name = verb_token[1..]
         end
 
+        # %expr is a parse-time macro: compile the formula string into a verb tree.
+        if verb_name == "expr" && !custom
+          return compile_expr_macro(tokens)
+        end
+
         arity = VERB_ARITY[verb_name]
 
         if arity.nil?
@@ -1068,6 +1088,27 @@ module Odin
           end
           [VerbExpr.new(verb_name, args, custom: custom), tokens]
         end
+      end
+
+      # Compile a %expr formula from the remaining tokens. arg0 is a quoted
+      # formula string; arg1, if present, is an @-reference bindings object.
+      def compile_expr_macro(tokens)
+        formula_token = tokens.shift
+        unless formula_token&.match?(/\A".*"\z/m)
+          raise Expr::ExprSyntaxError, "expected a quoted formula string"
+        end
+        formula = unescape_string(formula_token[1...-1])
+
+        binding_path = nil
+        if !tokens.empty? && !tokens.first.start_with?(":")
+          ref_token = tokens.shift
+          unless ref_token.start_with?("@")
+            raise Expr::ExprSyntaxError, "the bindings argument must be a reference such as @.vars"
+          end
+          binding_path = ref_token == "@" ? "" : ref_token[1..]
+        end
+
+        [Expr.compile(formula, binding_path), tokens]
       end
 
       EXTRACTION_DIRECTIVES = %w[pos len field trim].freeze

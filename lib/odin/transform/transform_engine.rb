@@ -1105,9 +1105,10 @@ module Odin
       def process_mapping(mapping, source, context, output, modifier_prefix: "")
         target = mapping.target_field
 
-        # Handle _pass directive and other underscore-prefixed targets
-        # but still evaluate `_` (bare underscore) for side effects like accumulate
-        if target == "_"
+        # An unrecognized `_`-prefixed target is a computation-only sink: it runs
+        # for side effects (accumulators, counters) but is never emitted. This
+        # lets several %accumulate/%set advance in one loop pass.
+        if target.start_with?("_")
           begin
             evaluate(mapping.expression, context)
           rescue StandardError => e
@@ -1115,7 +1116,6 @@ module Odin
           end
           return
         end
-        return if target.start_with?("_")
 
         begin
           mods = mapping_mods(mapping)
@@ -1532,17 +1532,10 @@ module Odin
         verb_name = expr.verb_name
         args = expr.arguments
 
-        # Lazy evaluation for conditional verbs — apply extraction to result
-        case verb_name
-        when "ifElse"
-          val = evaluate_if_else(args, context)
-          return apply_extraction_directives(val, extraction_directives)
-        when "cond"
-          val = evaluate_cond(args, context)
-          return apply_extraction_directives(val, extraction_directives)
-        when "switch"
-          val = evaluate_switch(args, context)
-          return apply_extraction_directives(val, extraction_directives)
+        # Lazy evaluation for control-flow verbs — apply extraction to result.
+        if !context.strict_types && LAZY_VERBS.include?(verb_name) && !(expr.respond_to?(:custom) && expr.custom)
+          handled, val = evaluate_lazy_verb(verb_name, args, context)
+          return apply_extraction_directives(val, extraction_directives) if handled
         end
 
         # Eager evaluation: apply extraction directives to CopyExpr arguments
@@ -1579,18 +1572,19 @@ module Odin
         invoke_verb(verb_name, evaluated_args, context)
       end
 
+      # Control-flow verbs that evaluate the condition first and run only the
+      # selected branch; and/or/coalesce short-circuit. Strict-types mode
+      # evaluates eagerly so every argument is validated.
+      LAZY_VERBS = %w[ifElse ifNull ifEmpty coalesce and or cond switch].freeze
+
       def evaluate_verb(expr, context)
         verb_name = expr.verb_name
         args = expr.arguments
 
-        # Lazy evaluation for conditional verbs
-        case verb_name
-        when "ifElse"
-          return evaluate_if_else(args, context)
-        when "cond"
-          return evaluate_cond(args, context)
-        when "switch"
-          return evaluate_switch(args, context)
+        # Lazy evaluation for control-flow verbs (skipped under strict types).
+        if !context.strict_types && LAZY_VERBS.include?(verb_name) && !(expr.respond_to?(:custom) && expr.custom)
+          handled, value = evaluate_lazy_verb(verb_name, args, context)
+          return value if handled
         end
 
         # Eager evaluation for all other verbs
@@ -1616,6 +1610,49 @@ module Odin
 
         # Look up and invoke verb
         invoke_verb(verb_name, evaluated_args, context)
+      end
+
+      # Dispatch a lazy control-flow verb. Returns [handled, value]; handled is
+      # false when arity is too low, so the caller falls back to eager paths.
+      def evaluate_lazy_verb(verb_name, args, context)
+        ev = ->(i) { evaluate(args[i], context) }
+        case verb_name
+        when "ifElse"
+          return [false, Types::DynValue.of_null] if args.length < 3
+          [true, ev.call(0).truthy? ? ev.call(1) : ev.call(2)]
+        when "ifNull"
+          return [false, Types::DynValue.of_null] if args.length < 2
+          v0 = ev.call(0)
+          [true, v0.null? ? ev.call(1) : v0]
+        when "ifEmpty"
+          return [false, Types::DynValue.of_null] if args.length < 2
+          v0 = ev.call(0)
+          [true, lazy_empty?(v0) ? ev.call(1) : v0]
+        when "coalesce"
+          args.each_index do |i|
+            v = ev.call(i)
+            return [true, v] unless v.null?
+          end
+          [true, Types::DynValue.of_null]
+        when "and"
+          return [false, Types::DynValue.of_null] if args.length < 2
+          return [true, Types::DynValue.of_bool(false)] unless ev.call(0).truthy?
+          [true, Types::DynValue.of_bool(ev.call(1).truthy?)]
+        when "or"
+          return [false, Types::DynValue.of_null] if args.length < 2
+          return [true, Types::DynValue.of_bool(true)] if ev.call(0).truthy?
+          [true, Types::DynValue.of_bool(ev.call(1).truthy?)]
+        when "cond"
+          [true, evaluate_cond(args, context)]
+        when "switch"
+          [true, evaluate_switch(args, context)]
+        else
+          [false, Types::DynValue.of_null]
+        end
+      end
+
+      def lazy_empty?(v)
+        v.nil? || v.null? || (v.string? && v.value.empty?)
       end
 
       def evaluate_if_else(args, context)
@@ -2751,6 +2788,7 @@ module Odin
         Verbs::AggregationVerbs.register(registry)
         Verbs::ObjectVerbs.register(registry)
         Verbs::GeoVerbs.register(registry)
+        Verbs::ExtraVerbs.register(registry)
 
         registry
       end

@@ -157,12 +157,13 @@ module Odin
           }
 
           registry["mod"] = ->(args, _ctx) {
-            a, b = args
-            av = NumericVerbs.to_double(a)
-            bv = NumericVerbs.to_double(b)
+            return dv.of_null if args.length < 2
+            av = NumericVerbs.to_double(args[0])
+            bv = NumericVerbs.to_double(args[1])
             return dv.of_null if av.nil? || bv.nil? || bv == 0.0
-            result = av.to_i % bv.to_i
-            dv.of_integer(result)
+            # Truncated remainder: the result follows the sign of the dividend.
+            result = av - bv * (av / bv).truncate
+            NumericVerbs.numeric_result(result)
           }
 
           registry["abs"] = ->(args, _ctx) {
