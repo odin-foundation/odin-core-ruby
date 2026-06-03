@@ -2772,6 +2772,31 @@ module Odin
          .gsub("'", "&apos;")
       end
 
+      # True when every backslash escape in a JSON string body is well-formed.
+      def valid_json_escapes?(s)
+        i = 0
+        len = s.length
+        while i < len
+          if s[i] == "\\"
+            i += 1
+            return false if i >= len
+            case s[i]
+            when "\"", "\\", "/", "b", "f", "n", "r", "t"
+              i += 1
+            when "u"
+              hex = s[(i + 1), 4]
+              return false if hex.nil? || hex.length < 4 || hex !~ /\A[0-9a-fA-F]{4}\z/
+              i += 5
+            else
+              return false
+            end
+          else
+            i += 1
+          end
+        end
+        true
+      end
+
       # ── Verb Registry ──
 
       def build_verb_registry
@@ -3675,7 +3700,8 @@ module Odin
             rescue JSON::ParserError
             end
           end
-          # Unescape as a JSON string.
+          # Unescape as a JSON string; an invalid escape yields null.
+          next Types::DynValue.of_null unless valid_json_escapes?(s)
           begin
             Types::DynValue.of_string(JSON.parse("\"#{s}\""))
           rescue JSON::ParserError
