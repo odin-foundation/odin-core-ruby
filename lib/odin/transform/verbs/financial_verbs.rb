@@ -175,7 +175,7 @@ module Odin
             cost = NumericVerbs.to_double(args[0])
             salvage = NumericVerbs.to_double(args[1])
             life = NumericVerbs.to_double(args[2])
-            return dv.of_null if cost.nil? || salvage.nil? || life.nil? || life == 0
+            return dv.of_null if cost.nil? || salvage.nil? || life.nil? || life <= 0 || salvage > cost
             FinancialVerbs.safe_result((cost - salvage) / life)
           }
 
@@ -244,7 +244,7 @@ module Odin
           registry["percentile"] = ->(args, _ctx) {
             items = CollectionVerbs.extract_items(args[0])
             p = NumericVerbs.to_double(args[1])
-            return dv.of_null if p.nil?
+            return dv.of_null if p.nil? || p < 0 || p > 100
             nums = items.filter_map { |item| NumericVerbs.to_double(item) }
             return dv.of_null if nums.empty?
             sorted = nums.sort
@@ -263,7 +263,7 @@ module Odin
           registry["quantile"] = ->(args, _ctx) {
             items = CollectionVerbs.extract_items(args[0])
             q = NumericVerbs.to_double(args[1])
-            return dv.of_null if q.nil?
+            return dv.of_null if q.nil? || q < 0 || q > 1
             nums = items.filter_map { |item| NumericVerbs.to_double(item) }
             return dv.of_null if nums.empty?
             sorted = nums.sort
@@ -288,7 +288,7 @@ module Odin
             mean_x = xs[0...n].sum / n.to_f
             mean_y = ys[0...n].sum / n.to_f
             cov = (0...n).sum { |i| (xs[i] - mean_x) * (ys[i] - mean_y) } / n.to_f
-            dv.of_float(cov)
+            NumericVerbs.numeric_result(cov)
           }
 
           registry["correlation"] = ->(args, _ctx) {
@@ -356,7 +356,7 @@ module Odin
               sum_w += w
             end
             return dv.of_null if sum_w == 0.0
-            dv.of_float(sum_vw / sum_w)
+            NumericVerbs.numeric_result(sum_vw / sum_w)
           }
 
           registry["movingAvg"] = ->(args, _ctx) {

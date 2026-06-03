@@ -272,17 +272,15 @@ RSpec.describe "Object Verbs" do
       expect(invoke("toObject", obj)).to eq(obj)
     end
 
-    it "uses index keys for non-pair arrays" do
+    it "returns null for arrays without valid pairs" do
       arr = dv.of_array([dv.of_string("a"), dv.of_string("b")])
       result = invoke("toObject", arr)
-      expect(result.get("0")).to eq(dv.of_string("a"))
-      expect(result.get("1")).to eq(dv.of_string("b"))
+      expect(result.null?).to be true
     end
 
-    it "returns an empty object for null" do
+    it "returns null for null" do
       result = invoke("toObject", dv.of_null)
-      expect(result.object?).to be true
-      expect(result.value).to eq({})
+      expect(result.null?).to be true
     end
   end
 end

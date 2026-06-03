@@ -63,6 +63,23 @@ module Odin
           end
         end
 
+        # Like to_double but coerces null and unparseable values to 0.
+        def to_number(v)
+          to_double(v) || 0.0
+        end
+
+        # Boolean coercion with strict string semantics.
+        def coerce_boolean(v)
+          return false if v.nil? || v.null?
+          case v.type
+          when :string then %w[true yes y 1].include?(v.value.strip.downcase)
+          when :integer then v.value != 0
+          when :float, :currency, :percent then v.value.to_f != 0.0
+          when :bool then v.value
+          else v.respond_to?(:truthy?) ? v.truthy? : false
+          end
+        end
+
         def numeric_result(val)
           if val == val.floor && val.abs < 2**53
             Types::DynValue.of_integer(val.to_i)
@@ -70,6 +87,13 @@ module Odin
             Types::DynValue.of_float(val)
           end
         end
+
+        LOCALE_SEPARATORS = {
+          "de-de" => [".", ","],
+          "fr-fr" => [" ", ","],
+          "en-us" => [",", "."],
+          "en-gb" => [",", "."]
+        }.freeze
 
         UNIT_FAMILIES = {
           "mass" => { "g" => 1.0, "kg" => 1000.0, "mg" => 0.001, "lb" => 453.592, "oz" => 28.3495, "ton" => 907185.0, "tonne" => 1000000.0 },
@@ -122,30 +146,15 @@ module Odin
           }
 
           registry["add"] = ->(args, _ctx) {
-            a, b = args
-            av = NumericVerbs.to_double(a)
-            bv = NumericVerbs.to_double(b)
-            return dv.of_null if av.nil? || bv.nil?
-            result = av + bv
-            NumericVerbs.numeric_result(result)
+            NumericVerbs.numeric_result(NumericVerbs.to_number(args[0]) + NumericVerbs.to_number(args[1]))
           }
 
           registry["subtract"] = ->(args, _ctx) {
-            a, b = args
-            av = NumericVerbs.to_double(a)
-            bv = NumericVerbs.to_double(b)
-            return dv.of_null if av.nil? || bv.nil?
-            result = av - bv
-            NumericVerbs.numeric_result(result)
+            NumericVerbs.numeric_result(NumericVerbs.to_number(args[0]) - NumericVerbs.to_number(args[1]))
           }
 
           registry["multiply"] = ->(args, _ctx) {
-            a, b = args
-            av = NumericVerbs.to_double(a)
-            bv = NumericVerbs.to_double(b)
-            return dv.of_null if av.nil? || bv.nil?
-            result = av * bv
-            NumericVerbs.numeric_result(result)
+            NumericVerbs.numeric_result(NumericVerbs.to_number(args[0]) * NumericVerbs.to_number(args[1]))
           }
 
           registry["divide"] = ->(args, _ctx) {
@@ -167,34 +176,23 @@ module Odin
           }
 
           registry["abs"] = ->(args, _ctx) {
-            v = args[0]
-            n = NumericVerbs.to_double(v)
-            return dv.of_null if n.nil?
-            v.integer? ? dv.of_integer(n.abs.to_i) : dv.of_float(n.abs)
+            NumericVerbs.numeric_result(NumericVerbs.to_number(args[0]).abs)
           }
 
           registry["floor"] = ->(args, _ctx) {
-            n = NumericVerbs.to_double(args[0])
-            return dv.of_null if n.nil?
-            dv.of_integer(n.floor)
+            dv.of_integer(NumericVerbs.to_number(args[0]).floor)
           }
 
           registry["ceil"] = ->(args, _ctx) {
-            n = NumericVerbs.to_double(args[0])
-            return dv.of_null if n.nil?
-            dv.of_integer(n.ceil)
+            dv.of_integer(NumericVerbs.to_number(args[0]).ceil)
           }
 
           registry["round"] = ->(args, _ctx) {
-            n = NumericVerbs.to_double(args[0])
-            return dv.of_null if n.nil?
+            n = NumericVerbs.to_number(args[0])
             places = NumericVerbs.to_double(args[1])&.to_i || 0
-            rounded = NumericVerbs.away_from_zero_round(n, places)
-            if rounded == rounded.to_i
-              dv.of_integer(rounded.to_i)
-            else
-              dv.of_float(rounded)
-            end
+            places = 0 if places.negative?
+            bd = BigDecimal(n.to_s).round(places, :banker)
+            NumericVerbs.numeric_result(bd.to_f)
           }
 
           registry["negate"] = ->(args, _ctx) {
@@ -225,6 +223,7 @@ module Odin
               # Seeded integer range: random(min, max, "seed") -> deterministic int in [min,max]
               min_v = (NumericVerbs.to_double(args[0]) || 0.0).to_i
               max_v = (NumericVerbs.to_double(args[1]) || 1.0).to_i
+              next dv.of_null if min_v > max_v
               seed = NumericVerbs.string_to_seed(args[2].to_string)
               rng = Mulberry32.new(seed)
               dv.of_integer(min_v + rng.next_int(max_v - min_v + 1))
@@ -296,22 +295,42 @@ module Odin
 
           registry["formatLocaleNumber"] = ->(args, _ctx) {
             raw = NumericVerbs.to_double(args[0])
-            return dv.of_null if raw.nil?
-            places = NumericVerbs.to_double(args[1])&.to_i || 2
-            rounded = NumericVerbs.away_from_zero_round(raw, places)
-            formatted = format("%.#{places}f", rounded)
-            # Add comma thousands separator
-            int_part, dec_part = formatted.split(".")
-            int_part = int_part.gsub(/(\d)(?=(\d{3})+(?!\d))/, '\\1,')
-            result = dec_part ? "#{int_part}.#{dec_part}" : int_part
+            return dv.of_null if raw.nil? || raw.nan? || raw.infinite?
+            locale = (args.length >= 2 ? args[1]&.to_string : "en-US").to_s.downcase
+            group, decimal = LOCALE_SEPARATORS[locale] || [",", "."]
+            places = -1
+            if args.length >= 3
+              d = NumericVerbs.to_double(args[2])
+              places = [d.to_i, 0].max unless d.nil?
+            end
+
+            base =
+              if places >= 0
+                format("%.#{places}f", NumericVerbs.away_from_zero_round(raw, places))
+              elsif raw == raw.floor
+                raw.to_i.to_s
+              else
+                format("%.3f", raw).sub(/0+\z/, "").sub(/\.\z/, "")
+              end
+            int_part, dec_part = base.split(".")
+            int_part = int_part.sub("-", "")
+            sign = base.start_with?("-") ? "-" : ""
+            int_part = int_part.gsub(/(\d)(?=(\d{3})+(?!\d))/, "\\1#{group}")
+            result = dec_part ? "#{sign}#{int_part}#{decimal}#{dec_part}" : "#{sign}#{int_part}"
             dv.of_string(result)
           }
 
           registry["log"] = ->(args, _ctx) {
             v = NumericVerbs.to_double(args[0])
-            base = NumericVerbs.to_double(args[1])
-            return dv.of_null if v.nil? || base.nil? || v <= 0 || base <= 0 || base == 1
-            result = Math.log(v) / Math.log(base)
+            return dv.of_null if v.nil? || v <= 0
+            # Single argument: natural logarithm.
+            if args.length < 2 || args[1].nil? || args[1].null?
+              result = Math.log(v)
+            else
+              base = NumericVerbs.to_double(args[1])
+              return dv.of_null if base.nil? || base <= 0 || base == 1
+              result = Math.log(v) / Math.log(base)
+            end
             return dv.of_null if result.nan? || result.infinite?
             NumericVerbs.numeric_result(result)
           }
@@ -337,7 +356,7 @@ module Odin
             return dv.of_null if v.nil?
             result = Math.exp(v)
             return dv.of_null if result.nan? || result.infinite?
-            dv.of_float(result)
+            NumericVerbs.numeric_result(result)
           }
 
           registry["pow"] = ->(args, _ctx) {
@@ -375,9 +394,12 @@ module Odin
 
           registry["isNaN"] = ->(args, _ctx) {
             v = args[0]
-            return dv.of_bool(true) if v.nil? || v.null?
-            n = NumericVerbs.to_double(v)
-            dv.of_bool(n.nil? || n.nan?)
+            return dv.of_bool(false) if v.nil?
+            case v.type
+            when :float, :float_raw then dv.of_bool(v.value.to_f.nan?)
+            when :string then dv.of_bool(v.value.strip.downcase == "nan")
+            else dv.of_bool(false)
+            end
           }
 
           registry["convertUnit"] = ->(args, _ctx) {

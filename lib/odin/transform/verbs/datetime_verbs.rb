@@ -21,6 +21,19 @@ module Odin
           end
         end
 
+        # Strict yyyy-MM-dd parse; returns nil for any other shape or invalid date.
+        def parse_iso_date(s)
+          s = s.to_string if s.is_a?(Types::DynValue)
+          return nil unless s.is_a?(String)
+          m = s.match(/\A(\d{4})-(\d{2})-(\d{2})\z/)
+          return nil unless m
+          begin
+            Date.new(m[1].to_i, m[2].to_i, m[3].to_i)
+          rescue ArgumentError
+            nil
+          end
+        end
+
         def parse_timestamp(s)
           return nil if s.nil?
           s = s.to_string if s.is_a?(Types::DynValue)
@@ -511,7 +524,7 @@ module Odin
             d1 = DateTimeVerbs.parse_date(v1)
             d2 = DateTimeVerbs.parse_date(v2)
             return dv.of_null unless d1 && d2
-            dv.of_integer((d2 - d1).to_i.abs)
+            dv.of_integer((d2 - d1).to_i)
           }
 
           registry["ageFromDate"] = ->(args, _ctx) {
@@ -532,8 +545,12 @@ module Odin
           registry["isValidDate"] = ->(args, _ctx) {
             s = args[0]&.to_string
             return dv.of_bool(false) if s.nil? || s.empty?
-            d = DateTimeVerbs.parse_date(s)
-            dv.of_bool(!d.nil?)
+            return dv.of_bool(true) unless DateTimeVerbs.parse_iso_date(s).nil?
+            if args.length >= 2
+              pattern = args[1]&.to_string || ""
+              return dv.of_bool(true) unless DateTimeVerbs.parse_date_with_pattern(s, pattern).nil?
+            end
+            dv.of_bool(false)
           }
 
           registry["formatLocaleDate"] = ->(args, _ctx) {

@@ -12,6 +12,11 @@ module Odin
 
         module_function
 
+        def valid_coords?(lat1, lon1, lat2, lon2)
+          lat1.between?(-90, 90) && lat2.between?(-90, 90) &&
+            lon1.between?(-180, 180) && lon2.between?(-180, 180)
+        end
+
         def register(registry)
           dv = Types::DynValue
 
@@ -77,6 +82,7 @@ module Odin
             lat2 = NumericVerbs.to_double(args[2])
             lon2 = NumericVerbs.to_double(args[3])
             return dv.of_null if lat1.nil? || lon1.nil? || lat2.nil? || lon2.nil?
+            return dv.of_null unless GeoVerbs.valid_coords?(lat1, lon1, lat2, lon2)
 
             lat1r = lat1 * DEG_TO_RAD
             lat2r = lat2 * DEG_TO_RAD
@@ -96,6 +102,7 @@ module Odin
             lat2 = NumericVerbs.to_double(args[2])
             lon2 = NumericVerbs.to_double(args[3])
             return dv.of_null if lat1.nil? || lon1.nil? || lat2.nil? || lon2.nil?
+            return dv.of_null unless GeoVerbs.valid_coords?(lat1, lon1, lat2, lon2)
 
             lat1r = lat1 * DEG_TO_RAD
             lat2r = lat2 * DEG_TO_RAD

@@ -1000,8 +1000,13 @@ RSpec.describe Odin::Transform::TransformEngine do
     end
 
     it "invokes coerceBoolean" do
-      result = engine.invoke_verb("coerceBoolean", [dv.of_string("hello")], ctx)
+      result = engine.invoke_verb("coerceBoolean", [dv.of_string("yes")], ctx)
       expect(result).to eq(dv.of_bool(true))
+    end
+
+    it "coerceBoolean returns false for non-truthy strings" do
+      result = engine.invoke_verb("coerceBoolean", [dv.of_string("hello")], ctx)
+      expect(result).to eq(dv.of_bool(false))
     end
 
     it "invokes coerceTimestamp" do

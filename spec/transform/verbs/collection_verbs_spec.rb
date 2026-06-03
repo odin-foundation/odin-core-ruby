@@ -528,12 +528,13 @@ RSpec.describe "Collection Verbs" do
       expect(result.value[0].value[1].to_string).to eq("a")
     end
 
-    it "zips unequal length arrays with null padding" do
+    it "truncates to the shortest array length" do
       a = arr(int(1), int(2))
       b = arr(str("a"))
       result = invoke("zip", a, b)
-      expect(result.value.length).to eq(2)
-      expect(result.value[1].value[1].null?).to be true
+      expect(result.value.length).to eq(1)
+      expect(result.value[0].value[0].to_number).to eq(1)
+      expect(result.value[0].value[1].to_string).to eq("a")
     end
   end
 

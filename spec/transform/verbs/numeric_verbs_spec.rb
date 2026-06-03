@@ -45,19 +45,20 @@ RSpec.describe "Numeric Verbs" do
       expect(result.value).to eq(7.0)
     end
 
-    it "returns null when both args are null" do
+    it "coerces both null args to zero" do
       result = invoke("add", dv.of_null, dv.of_null)
-      expect(result.null?).to be true
+      expect(result.value).to eq(0)
+      expect(result.integer?).to be true
     end
 
-    it "returns null when first arg is null" do
+    it "coerces a null first arg to zero" do
       result = invoke("add", dv.of_null, dv.of_integer(5))
-      expect(result.null?).to be true
+      expect(result.value).to eq(5)
     end
 
-    it "returns null when second arg is null" do
+    it "coerces a null second arg to zero" do
       result = invoke("add", dv.of_integer(5), dv.of_null)
-      expect(result.null?).to be true
+      expect(result.value).to eq(5)
     end
 
     it "adds zero" do
@@ -95,19 +96,20 @@ RSpec.describe "Numeric Verbs" do
       expect(result.float?).to be true
     end
 
-    it "returns null when first arg is null" do
+    it "coerces a null first arg to zero" do
       result = invoke("subtract", dv.of_null, dv.of_integer(5))
-      expect(result.null?).to be true
+      expect(result.value).to eq(-5)
     end
 
-    it "returns null when second arg is null" do
+    it "coerces a null second arg to zero" do
       result = invoke("subtract", dv.of_integer(5), dv.of_null)
-      expect(result.null?).to be true
+      expect(result.value).to eq(5)
     end
 
-    it "returns null when both args are null" do
+    it "coerces both null args to zero" do
       result = invoke("subtract", dv.of_null, dv.of_null)
-      expect(result.null?).to be true
+      expect(result.value).to eq(0)
+      expect(result.integer?).to be true
     end
 
     it "subtracts zero" do
@@ -145,14 +147,16 @@ RSpec.describe "Numeric Verbs" do
       expect(result.float?).to be true
     end
 
-    it "returns null when first arg is null" do
+    it "coerces a null first arg to zero" do
       result = invoke("multiply", dv.of_null, dv.of_integer(5))
-      expect(result.null?).to be true
+      expect(result.value).to eq(0)
+      expect(result.integer?).to be true
     end
 
-    it "returns null when second arg is null" do
+    it "coerces a null second arg to zero" do
       result = invoke("multiply", dv.of_integer(5), dv.of_null)
-      expect(result.null?).to be true
+      expect(result.value).to eq(0)
+      expect(result.integer?).to be true
     end
 
     it "multiplies by zero" do
@@ -262,9 +266,10 @@ RSpec.describe "Numeric Verbs" do
       expect(result.float?).to be true
     end
 
-    it "returns null for null" do
+    it "coerces null to zero" do
       result = invoke("abs", dv.of_null)
-      expect(result.null?).to be true
+      expect(result.value).to eq(0)
+      expect(result.integer?).to be true
     end
 
     it "returns zero for zero" do
@@ -292,9 +297,9 @@ RSpec.describe "Numeric Verbs" do
       expect(result.value).to eq(5)
     end
 
-    it "returns null for null" do
+    it "coerces null to zero" do
       result = invoke("floor", dv.of_null)
-      expect(result.null?).to be true
+      expect(result.value).to eq(0)
     end
   end
 
@@ -317,29 +322,29 @@ RSpec.describe "Numeric Verbs" do
       expect(result.value).to eq(5)
     end
 
-    it "returns null for null" do
+    it "coerces null to zero" do
       result = invoke("ceil", dv.of_null)
-      expect(result.null?).to be true
+      expect(result.value).to eq(0)
     end
   end
 
   # ---------------------------------------------------------------------------
-  # round (AWAY FROM ZERO)
+  # round (HALF TO EVEN)
   # ---------------------------------------------------------------------------
   describe "round" do
-    it "rounds 2.5 up to 3 (away from zero)" do
+    it "rounds 2.5 to 2 (half to even)" do
       result = invoke("round", dv.of_float(2.5), dv.of_integer(0))
-      expect(result.value).to eq(3)
+      expect(result.value).to eq(2)
     end
 
-    it "rounds -2.5 down to -3 (away from zero)" do
+    it "rounds -2.5 to -2 (half to even)" do
       result = invoke("round", dv.of_float(-2.5), dv.of_integer(0))
-      expect(result.value).to eq(-3)
+      expect(result.value).to eq(-2)
     end
 
-    it "rounds 1.005 to 2 decimal places" do
+    it "rounds 1.005 to 1.0 at 2 decimal places (half to even)" do
       result = invoke("round", dv.of_float(1.005), dv.of_integer(2))
-      expect(result.value).to eq(1.01)
+      expect(result.value).to eq(1.0)
     end
 
     it "rounds zero to zero" do
@@ -352,14 +357,14 @@ RSpec.describe "Numeric Verbs" do
       expect(result.value).to eq(3.14)
     end
 
-    it "rounds 3.145 to 2 decimal places (away from zero)" do
+    it "rounds 3.145 to 3.14 at 2 decimal places (half to even)" do
       result = invoke("round", dv.of_float(3.145), dv.of_integer(2))
-      expect(result.value).to eq(3.15)
+      expect(result.value).to eq(3.14)
     end
 
-    it "returns null for null" do
+    it "coerces null to zero" do
       result = invoke("round", dv.of_null, dv.of_integer(0))
-      expect(result.null?).to be true
+      expect(result.value).to eq(0)
     end
   end
 

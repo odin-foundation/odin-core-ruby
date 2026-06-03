@@ -2862,7 +2862,19 @@ module Odin
         # Type checks
         registry["typeOf"] = ->(args, _ctx) {
           v = args[0]
-          type_str = v.nil? ? "null" : v.type.to_s
+          type_str =
+            if v.nil?
+              "null"
+            else
+              {
+                null: "null", bool: "boolean", integer: "integer",
+                float: "number", float_raw: "number", string: "string",
+                array: "array", object: "object", date: "date",
+                timestamp: "timestamp", time: "time", duration: "duration",
+                currency: "currency", currency_raw: "currency", percent: "percent",
+                reference: "reference", binary: "binary"
+              }.fetch(v.type, "unknown")
+            end
           Types::DynValue.of_string(type_str)
         }
         registry["isString"] = ->(args, _ctx) { Types::DynValue.of_bool(args[0]&.string? || false) }
@@ -2874,9 +2886,9 @@ module Odin
 
         # Coercion
         registry["coerceString"] = ->(args, _ctx) { Types::DynValue.of_string(args[0]&.to_string || "") }
-        registry["coerceNumber"] = ->(args, _ctx) { Types::DynValue.of_float(args[0]&.to_number&.to_f || 0.0) }
-        registry["coerceInteger"] = ->(args, _ctx) { Types::DynValue.of_integer(args[0]&.to_number&.to_i || 0) }
-        registry["coerceBoolean"] = ->(args, _ctx) { Types::DynValue.of_bool(args[0]&.truthy? || false) }
+        registry["coerceNumber"] = ->(args, _ctx) { Verbs::NumericVerbs.numeric_result(Verbs::NumericVerbs.to_number(args[0])) }
+        registry["coerceInteger"] = ->(args, _ctx) { Types::DynValue.of_integer(Verbs::NumericVerbs.to_number(args[0]).floor) }
+        registry["coerceBoolean"] = ->(args, _ctx) { Types::DynValue.of_bool(Verbs::NumericVerbs.coerce_boolean(args[0])) }
 
         # Arithmetic
         registry["add"] = ->(args, _ctx) {
@@ -3164,19 +3176,20 @@ module Odin
           Types::DynValue.of_bool(args[0]&.truthy? || args[1]&.truthy?)
         }
 
-        # Comparison
-        registry["lt"] = ->(args, _ctx) {
-          Types::DynValue.of_bool((args[0]&.to_number || 0) < (args[1]&.to_number || 0))
-        }
-        registry["lte"] = ->(args, _ctx) {
-          Types::DynValue.of_bool((args[0]&.to_number || 0) <= (args[1]&.to_number || 0))
-        }
-        registry["gt"] = ->(args, _ctx) {
-          Types::DynValue.of_bool((args[0]&.to_number || 0) > (args[1]&.to_number || 0))
-        }
-        registry["gte"] = ->(args, _ctx) {
-          Types::DynValue.of_bool((args[0]&.to_number || 0) >= (args[1]&.to_number || 0))
-        }
+        # Comparison: numeric when both coerce to numbers, else lexical.
+        compare = lambda do |a, b|
+          an = Verbs::NumericVerbs.to_double(a)
+          bn = Verbs::NumericVerbs.to_double(b)
+          if !an.nil? && !bn.nil?
+            an <=> bn
+          else
+            (a&.to_string || "") <=> (b&.to_string || "")
+          end
+        end
+        registry["lt"] = ->(args, _ctx) { Types::DynValue.of_bool(compare.call(args[0], args[1]) < 0) }
+        registry["lte"] = ->(args, _ctx) { Types::DynValue.of_bool(compare.call(args[0], args[1]) <= 0) }
+        registry["gt"] = ->(args, _ctx) { Types::DynValue.of_bool(compare.call(args[0], args[1]) > 0) }
+        registry["gte"] = ->(args, _ctx) { Types::DynValue.of_bool(compare.call(args[0], args[1]) >= 0) }
 
         # String operations
         registry["contains"] = ->(args, _ctx) {
@@ -3250,13 +3263,10 @@ module Odin
           end
         }
 
-        # Assertions
+        # Assertions: pass the value through when truthy, else null.
         registry["assert"] = ->(args, _ctx) {
           condition = args[0]
-          msg = args[1]&.to_string || "Assertion failed"
-          raise TransformError.new(msg) unless condition&.truthy?
-
-          Types::DynValue.of_bool(true)
+          condition&.truthy? ? condition : Types::DynValue.of_null
         }
 
         # Switch/cond handled via lazy evaluation in evaluate_verb
@@ -3304,16 +3314,24 @@ module Odin
         }
 
         registry["titleCase"] = ->(args, _ctx) {
-          s = args[0]&.to_string || ""
-          Types::DynValue.of_string(s.gsub(/\b\w/) { |m| m.upcase })
+          v = args[0]
+          next Types::DynValue.of_null if v.nil? || v.null?
+          s = v.to_string
+          next Types::DynValue.of_string("") if s.empty?
+          result = s.split(/\s+/).map { |w| w.empty? ? "" : w[0].upcase + w[1..].downcase }.join(" ")
+          Types::DynValue.of_string(result)
         }
 
         registry["slugify"] = ->(args, _ctx) {
-          s = args[0]&.to_string || ""
+          v = args[0]
+          next Types::DynValue.of_null if v.nil? || v.null?
+          s = v.to_string
+          next Types::DynValue.of_string("") if s.empty?
           result = s.downcase
-                    .gsub(/[^a-z0-9\s-]/, "")
-                    .strip
-                    .gsub(/[\s-]+/, "-")
+                    .gsub(/[^a-z0-9_\s-]/, "")
+                    .gsub(/[\s_]+/, "-")
+                    .gsub(/-+/, "-")
+                    .gsub(/\A-+|-+\z/, "")
           Types::DynValue.of_string(result)
         }
 
@@ -3390,12 +3408,15 @@ module Odin
         }
 
         registry["split"] = ->(args, _ctx) {
-          s = args[0]&.to_string || ""
-          delimiter = args[1]&.to_string || ","
-          parts = s.split(delimiter, -1)
-          # If a third argument (index) is provided, return that element
+          v = args[0]
+          next Types::DynValue.of_null if v.nil? || v.null?
+          s = v.to_string
+          delimiter = args[1]&.to_string || ""
+          parts = delimiter.empty? ? [s] : s.split(delimiter, -1)
+          # If a third argument (index) is provided, return that element.
           if args[2] && !args[2].null?
-            idx = args[2].to_number&.to_i || 0
+            idx = Verbs::NumericVerbs.to_double(args[2])&.to_i || 0
+            idx += parts.length if idx < 0
             if idx >= 0 && idx < parts.length
               Types::DynValue.of_string(parts[idx])
             else
@@ -3426,12 +3447,14 @@ module Odin
         }
 
         registry["match"] = ->(args, _ctx) {
+          next Types::DynValue.of_null if args.length < 2
           s = args[0]&.to_string || ""
           pattern = args[1]&.to_string || ""
           begin
+            next Types::DynValue.of_null if pattern.length > 256 || s.length > 100_000
             Types::DynValue.of_bool(!!(s =~ Regexp.new(pattern)))
           rescue RegexpError
-            Types::DynValue.of_bool(false)
+            Types::DynValue.of_null
           end
         }
         registry["matches"] = registry["match"]
@@ -3475,20 +3498,24 @@ module Odin
         }
 
         registry["repeat"] = ->(args, _ctx) {
-          s = args[0]&.to_string || ""
-          count = args[1]&.to_number&.to_i || 0
-          count = 0 if count < 0
-          Types::DynValue.of_string(s * count)
+          v = args[0]
+          next Types::DynValue.of_null if v.nil? || v.null?
+          count = Verbs::NumericVerbs.to_double(args[1])&.to_i
+          next Types::DynValue.of_null if count.nil? || count < 0
+          count = 100_000 if count > 100_000
+          Types::DynValue.of_string(v.to_string * count)
         }
 
         registry["replaceRegex"] = ->(args, _ctx) {
-          s = args[0]&.to_string || ""
+          next Types::DynValue.of_null if args.length < 3 || args[0].nil? || args[0].null?
+          s = args[0].to_string
           pattern = args[1]&.to_string || ""
           replacement = args[2]&.to_string || ""
           begin
+            next Types::DynValue.of_null if pattern.length > 256 || s.length > 100_000
             Types::DynValue.of_string(s.gsub(Regexp.new(pattern), replacement))
           rescue RegexpError
-            Types::DynValue.of_string(s)
+            Types::DynValue.of_null
           end
         }
 
@@ -3569,10 +3596,17 @@ module Odin
         }
 
         registry["base64Decode"] = ->(args, _ctx) {
-          s = args[0]&.to_string || ""
+          v = args[0]
+          next Types::DynValue.of_null if v.nil? || v.null?
+          s = v.to_string.tr("-_", "+/")
+          pad = (4 - s.length % 4) % 4
+          s += "=" * pad
           require "base64"
           begin
-            Types::DynValue.of_string(Base64.strict_decode64(s))
+            decoded = Base64.strict_decode64(s)
+            decoded.force_encoding("UTF-8")
+            next Types::DynValue.of_null unless decoded.valid_encoding?
+            Types::DynValue.of_string(decoded)
           rescue ArgumentError
             Types::DynValue.of_null
           end
@@ -3584,42 +3618,66 @@ module Odin
         }
 
         registry["hexDecode"] = ->(args, _ctx) {
-          s = args[0]&.to_string || ""
+          v = args[0]
+          next Types::DynValue.of_null if v.nil? || v.null?
+          s = v.to_string
+          next Types::DynValue.of_null if s.length.odd? || s.match?(/[^0-9a-fA-F]/)
+          decoded = [s].pack("H*")
+          decoded.force_encoding("UTF-8")
+          next Types::DynValue.of_null unless decoded.valid_encoding?
+          Types::DynValue.of_string(decoded)
+        }
+
+        registry["urlEncode"] = ->(args, _ctx) {
+          v = args[0]
+          next Types::DynValue.of_null if v.nil? || v.null?
+          require "uri"
+          Types::DynValue.of_string(URI.encode_www_form_component(v.to_string, "UTF-8").gsub("+", "%20").gsub("%7E", "~"))
+        }
+
+        registry["urlDecode"] = ->(args, _ctx) {
+          v = args[0]
+          next Types::DynValue.of_null if v.nil? || v.null?
+          s = v.to_string
+          # Reject malformed percent-encoding (% not followed by two hex digits).
+          next Types::DynValue.of_null if s.scan(/%(..?|.?)/).any? { |seq| seq[0].length != 2 || seq[0].match?(/[^0-9a-fA-F]/) }
+          require "uri"
           begin
-            Types::DynValue.of_string([s].pack("H*"))
+            decoded = URI.decode_www_form_component(s, "UTF-8")
+            next Types::DynValue.of_null unless decoded.valid_encoding?
+            Types::DynValue.of_string(decoded)
           rescue ArgumentError
             Types::DynValue.of_null
           end
         }
 
-        registry["urlEncode"] = ->(args, _ctx) {
-          s = args[0]&.to_string || ""
-          require "uri"
-          Types::DynValue.of_string(URI.encode_www_form_component(s).gsub("+", "%20"))
-        }
-
-        registry["urlDecode"] = ->(args, _ctx) {
-          s = args[0]&.to_string || ""
-          require "uri"
-          begin
-            Types::DynValue.of_string(URI.decode_www_form_component(s))
-          rescue ArgumentError
-            Types::DynValue.of_string(s)
-          end
-        }
-
         registry["jsonEncode"] = ->(args, _ctx) {
           v = args[0]
+          next Types::DynValue.of_null if v.nil? || v.null?
           require "json"
-          Types::DynValue.of_string(v.nil? || v.null? ? "null" : JSON.generate(v.to_ruby))
+          if v.object? || v.array?
+            next Types::DynValue.of_string(JSON.generate(v.to_ruby))
+          end
+          # Scalars: JSON-escape the string and drop the surrounding quotes.
+          encoded = JSON.generate(v.to_string)
+          Types::DynValue.of_string(encoded[1...-1])
         }
 
         registry["jsonDecode"] = ->(args, _ctx) {
-          s = args[0]&.to_string || ""
+          v = args[0]
+          next Types::DynValue.of_null if v.nil? || v.null?
+          s = v.to_string
           require "json"
+          if s.start_with?("{", "[")
+            begin
+              parsed = JSON.parse(s)
+              next Types::DynValue.from_ruby(parsed) if parsed.is_a?(Hash) || parsed.is_a?(Array)
+            rescue JSON::ParserError
+            end
+          end
+          # Unescape as a JSON string.
           begin
-            parsed = JSON.parse(s)
-            Types::DynValue.from_ruby(parsed)
+            Types::DynValue.of_string(JSON.parse("\"#{s}\""))
           rescue JSON::ParserError
             Types::DynValue.of_null
           end
@@ -3716,13 +3774,38 @@ module Odin
         registry["coerceDate"] = ->(args, _ctx) {
           v = args[0]
           return Types::DynValue.of_null if v.nil? || v.null?
-          s = v.to_string.strip
-          begin
-            d = Date.parse(s)
-            Types::DynValue.of_date(d.strftime("%Y-%m-%d"))
-          rescue ArgumentError, TypeError
-            Types::DynValue.of_null
+          return v if v.type == :date
+          if v.type == :timestamp
+            s = v.to_string
+            s = s[0...s.index("T")] if s.include?("T")
+            next Types::DynValue.of_date(s)
           end
+
+          s = v.to_string.strip
+          next Types::DynValue.of_null if s.empty?
+
+          valid_ymd = ->(y, mo, d) { mo.between?(1, 12) && d >= 1 && Date.valid_date?(y, mo, d) }
+
+          # yyyy-MM-dd prefix
+          if s.length >= 10 && s[4] == "-" && s[7] == "-" &&
+             s[0, 4] =~ /\A\d{4}\z/ && s[5, 2] =~ /\A\d{2}\z/ && s[8, 2] =~ /\A\d{2}\z/
+            next Types::DynValue.of_date(s[0, 10])
+          end
+
+          # Compact YYYYMMDD
+          if (m = s.match(/\A(\d{4})(\d{2})(\d{2})\z/))
+            y, mo, d = m[1].to_i, m[2].to_i, m[3].to_i
+            next valid_ymd.call(y, mo, d) ? Types::DynValue.of_date(format("%04d-%02d-%02d", y, mo, d)) : Types::DynValue.of_null
+          end
+
+          # Slash MM/DD/YYYY (US), or DD/MM/YYYY when first > 12
+          if (m = s.match(%r{\A(\d{1,2})/(\d{1,2})/(\d{4})\z}))
+            first, second, y = m[1].to_i, m[2].to_i, m[3].to_i
+            mo, d = first > 12 ? [second, first] : [first, second]
+            next valid_ymd.call(y, mo, d) ? Types::DynValue.of_date(format("%04d-%02d-%02d", y, mo, d)) : Types::DynValue.of_null
+          end
+
+          Types::DynValue.of_null
         }
 
         registry["coerceTimestamp"] = ->(args, _ctx) {
@@ -3753,23 +3836,19 @@ module Odin
         registry["toObject"] = ->(args, _ctx) {
           v = args[0]
           if v.nil? || v.null?
-            Types::DynValue.of_object({})
+            Types::DynValue.of_null
           elsif v.object?
             v
           elsif v.array?
             items = v.value || []
-            pairs = items.map { |item| to_object_pair(item) }
-            if !items.empty? && pairs.all?
-              obj = {}
-              pairs.each { |k, val| obj[k] = val }
-              Types::DynValue.of_object(obj)
-            else
-              obj = {}
-              items.each_with_index { |item, i| obj[i.to_s] = item }
-              Types::DynValue.of_object(obj)
+            obj = {}
+            items.each do |item|
+              pair = to_object_pair(item)
+              obj[pair[0]] = pair[1] if pair
             end
+            obj.empty? ? Types::DynValue.of_null : Types::DynValue.of_object(obj)
           else
-            Types::DynValue.of_object({ "value" => v })
+            Types::DynValue.of_null
           end
         }
 
@@ -3833,11 +3912,8 @@ module Odin
           digits = raw.gsub(/\D/, "")
           formatted = case country
           when "US", "CA"
-            if digits.length == 10
-              "(#{digits[0..2]}) #{digits[3..5]}-#{digits[6..9]}"
-            elsif digits.length == 11 && digits.start_with?("1")
-              "+1 (#{digits[1..3]}) #{digits[4..6]}-#{digits[7..10]}"
-            end
+            d = (digits.length == 11 && digits.start_with?("1")) ? digits[1..] : digits
+            "(#{d[0..2]}) #{d[3..5]}-#{d[6..9]}" if d.length == 10
           when "GB"
             if digits.length == 11 && digits.start_with?("0")
               "+44 #{digits[1..4]} #{digits[5..10]}"

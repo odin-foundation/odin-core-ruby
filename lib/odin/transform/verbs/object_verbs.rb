@@ -20,6 +20,19 @@ module Odin
           nil
         end
 
+        # Navigate a dotted key path; returns the DynValue or nil if absent.
+        def dig_path(value, path)
+          obj = extract_obj(value)
+          return nil if obj.nil?
+          current = obj
+          path.split(".").each do |seg|
+            return nil unless current.is_a?(Hash) && current.key?(seg)
+            nxt = current[seg]
+            current = nxt&.object? ? nxt.value : nxt
+          end
+          current.is_a?(Hash) ? Types::DynValue.of_object(current) : current
+        end
+
         def register(registry)
           dv = Types::DynValue
 
@@ -43,20 +56,14 @@ module Odin
           }
 
           registry["has"] = ->(args, _ctx) {
-            obj = ObjectVerbs.extract_obj(args[0])
-            key = args[1]&.to_string || ""
-            dv.of_bool(obj&.key?(key) || false)
+            found = ObjectVerbs.dig_path(args[0], args[1]&.to_string || "")
+            dv.of_bool(!found.nil?)
           }
 
           registry["get"] = ->(args, _ctx) {
-            obj = ObjectVerbs.extract_obj(args[0])
-            key = args[1]&.to_string || ""
             default_val = args[2] || dv.of_null
-            if obj && obj.key?(key)
-              obj[key]
-            else
-              default_val
-            end
+            found = ObjectVerbs.dig_path(args[0], args[1]&.to_string || "")
+            found.nil? ? default_val : found
           }
 
           registry["merge"] = ->(args, _ctx) {

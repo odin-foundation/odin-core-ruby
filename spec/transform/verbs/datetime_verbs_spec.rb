@@ -883,9 +883,9 @@ RSpec.describe "DateTime Verbs" do
       expect(result.value).to eq(30)
     end
 
-    it "returns absolute value regardless of order" do
+    it "returns a negative value when the second date precedes the first" do
       result = invoke("daysBetweenDates", dv.of_date("2024-01-31"), dv.of_date("2024-01-01"))
-      expect(result.value).to eq(30)
+      expect(result.value).to eq(-30)
     end
 
     it "returns 0 for same date" do

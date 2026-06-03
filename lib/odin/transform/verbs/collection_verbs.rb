@@ -7,17 +7,22 @@ module Odin
         module_function
 
         def extract_items(v)
-          return [] if v.nil? || v.null?
+          as_items(v) || []
+        end
+
+        # Returns the underlying array items, or nil when v is not array-like.
+        def as_items(v)
+          return nil if v.nil? || v.null?
           return v.value if v.array?
           if v.string?
             begin
               parsed = Types::DynValue.extract_array(v.value)
-              return parsed.value
+              return parsed.value if parsed.array?
             rescue
-              return []
+              return nil
             end
           end
-          []
+          nil
         end
 
         def compare_dyn_values(a, b)
@@ -222,9 +227,15 @@ module Odin
           }
 
           registry["every"] = ->(args, _ctx) {
-            items = CollectionVerbs.extract_items(args[0])
+            items = CollectionVerbs.as_items(args[0])
+            return dv.of_null if items.nil?
             return dv.of_bool(true) if items.empty?
-            if args.length >= 2
+            if args.length >= 4
+              field = args[1]&.to_string || ""
+              op = args[2]&.to_string || "="
+              compare = args[3]
+              dv.of_bool(items.all? { |item| CollectionVerbs.matches_condition?(item, field, op, compare) })
+            elsif args.length >= 2
               field = args[1]&.to_string || ""
               dv.of_bool(items.all? { |item| (item.object? ? item.get(field) : item)&.truthy? || false })
             else
@@ -233,9 +244,15 @@ module Odin
           }
 
           registry["some"] = ->(args, _ctx) {
-            items = CollectionVerbs.extract_items(args[0])
+            items = CollectionVerbs.as_items(args[0])
+            return dv.of_null if items.nil?
             return dv.of_bool(false) if items.empty?
-            if args.length >= 2
+            if args.length >= 4
+              field = args[1]&.to_string || ""
+              op = args[2]&.to_string || "="
+              compare = args[3]
+              dv.of_bool(items.any? { |item| CollectionVerbs.matches_condition?(item, field, op, compare) })
+            elsif args.length >= 2
               field = args[1]&.to_string || ""
               dv.of_bool(items.any? { |item| (item.object? ? item.get(field) : item)&.truthy? || false })
             else
@@ -272,24 +289,19 @@ module Odin
           }
 
           registry["concatArrays"] = ->(args, _ctx) {
+            extracted = args.map { |a| CollectionVerbs.as_items(a) }
+            return dv.of_null if extracted.all?(&:nil?)
             result = []
-            args.each do |a|
-              if a&.array?
-                result.concat(a.value)
-              elsif !a.nil? && !a.null?
-                result << a
-              end
-            end
+            extracted.each { |items| result.concat(items) if items }
             dv.of_array(result)
           }
 
           registry["zip"] = ->(args, _ctx) {
-            arrays = args.map { |a| CollectionVerbs.extract_items(a) }
-            return dv.of_array([]) if arrays.empty?
-            max_len = arrays.map(&:length).max || 0
-            result = (0...max_len).map do |i|
-              pair = arrays.map { |arr| i < arr.length ? arr[i] : dv.of_null }
-              dv.of_array(pair)
+            extracted = args.map { |a| CollectionVerbs.as_items(a) }
+            return dv.of_null if extracted.any?(&:nil?) || extracted.empty?
+            min_len = extracted.map(&:length).min || 0
+            result = (0...min_len).map do |i|
+              dv.of_array(extracted.map { |arr| arr[i] })
             end
             dv.of_array(result)
           }
@@ -331,22 +343,24 @@ module Odin
           }
 
           registry["take"] = ->(args, _ctx) {
-            items = CollectionVerbs.extract_items(args[0])
+            items = CollectionVerbs.as_items(args[0])
             n = NumericVerbs.to_double(args[1])&.to_i || 0
-            dv.of_array(items.first([n, 0].max))
+            return dv.of_null if items.nil? || n < 0
+            dv.of_array(items.first(n))
           }
           registry["limit"] = registry["take"]
 
           registry["drop"] = ->(args, _ctx) {
-            items = CollectionVerbs.extract_items(args[0])
+            items = CollectionVerbs.as_items(args[0])
             n = NumericVerbs.to_double(args[1])&.to_i || 0
-            dv.of_array(items.drop([n, 0].max))
+            return dv.of_null if items.nil? || n < 0
+            dv.of_array(items.drop(n))
           }
 
           registry["chunk"] = ->(args, _ctx) {
-            items = CollectionVerbs.extract_items(args[0])
+            items = CollectionVerbs.as_items(args[0])
             size = NumericVerbs.to_double(args[1])&.to_i || 1
-            size = 1 if size < 1
+            return dv.of_null if items.nil? || size < 1
             chunks = items.each_slice(size).map { |c| dv.of_array(c) }
             dv.of_array(chunks)
           }
@@ -386,7 +400,8 @@ module Odin
           }
 
           registry["compact"] = ->(args, _ctx) {
-            items = CollectionVerbs.extract_items(args[0])
+            items = CollectionVerbs.as_items(args[0])
+            return dv.of_null if items.nil?
             dv.of_array(items.reject { |item| item.null? || (item.string? && item.value.empty?) })
           }
 
@@ -435,7 +450,8 @@ module Odin
           }
 
           registry["dedupe"] = ->(args, _ctx) {
-            items = CollectionVerbs.extract_items(args[0])
+            items = CollectionVerbs.as_items(args[0])
+            return dv.of_null if items.nil?
             field = args[1]&.to_string
             result = []
             last_key = nil
@@ -454,7 +470,8 @@ module Odin
           }
 
           registry["cumsum"] = ->(args, _ctx) {
-            items = CollectionVerbs.extract_items(args[0])
+            items = CollectionVerbs.as_items(args[0])
+            return dv.of_null if items.nil?
             sum = 0.0
             result = items.map do |item|
               n = NumericVerbs.to_double(item)
@@ -469,7 +486,8 @@ module Odin
           }
 
           registry["cumprod"] = ->(args, _ctx) {
-            items = CollectionVerbs.extract_items(args[0])
+            items = CollectionVerbs.as_items(args[0])
+            return dv.of_null if items.nil?
             prod = 1.0
             result = items.map do |item|
               n = NumericVerbs.to_double(item)
@@ -484,7 +502,8 @@ module Odin
           }
 
           registry["diff"] = ->(args, _ctx) {
-            items = CollectionVerbs.extract_items(args[0])
+            items = CollectionVerbs.as_items(args[0])
+            return dv.of_null if items.nil?
             lag = args[1] ? (NumericVerbs.to_double(args[1])&.to_i || 1) : 1
             result = items.each_with_index.map do |item, i|
               if i < lag
@@ -503,7 +522,8 @@ module Odin
           }
 
           registry["pctChange"] = ->(args, _ctx) {
-            items = CollectionVerbs.extract_items(args[0])
+            items = CollectionVerbs.as_items(args[0])
+            return dv.of_null if items.nil?
             lag = args[1] ? (NumericVerbs.to_double(args[1])&.to_i || 1) : 1
             result = items.each_with_index.map do |item, i|
               if i < lag
@@ -514,7 +534,7 @@ module Odin
                 if curr.nil? || prev.nil? || prev == 0.0
                   dv.of_null
                 else
-                  dv.of_float((curr - prev) / prev)
+                  NumericVerbs.numeric_result((curr - prev) / prev)
                 end
               end
             end
