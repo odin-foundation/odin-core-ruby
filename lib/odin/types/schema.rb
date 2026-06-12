@@ -154,11 +154,12 @@ module Odin
     # Schema type definition (named object structure)
     class SchemaType
       attr_reader :name, :fields, :namespace, :composition,
-                  :base_type, :constraints, :intersection_types, :parent_types
+                  :base_type, :constraints, :intersection_types, :parent_types,
+                  :arrays
 
       def initialize(name:, fields: {}, namespace: nil, composition: nil,
                      base_type: nil, constraints: nil, intersection_types: nil,
-                     parent_types: nil)
+                     parent_types: nil, arrays: {})
         @name = name.freeze
         @fields = fields.freeze
         @namespace = namespace&.freeze
@@ -167,22 +168,27 @@ module Odin
         @constraints = (constraints || {}).freeze
         @intersection_types = intersection_types&.freeze
         @parent_types = parent_types&.freeze
+        # Array-of-object entries declared inside the type, keyed by array name.
+        @arrays = (arrays || {}).freeze
         freeze
       end
     end
 
     # Schema array definition
     class SchemaArray
-      attr_reader :path, :item_fields, :min_items, :max_items, :unique, :columns
+      attr_reader :path, :item_fields, :min_items, :max_items, :unique, :columns,
+                  :item_type_ref
 
       def initialize(path:, item_fields: {}, min_items: nil, max_items: nil,
-                     unique: false, columns: nil)
+                     unique: false, columns: nil, item_type_ref: nil)
         @path = path.freeze
         @item_fields = item_fields.freeze
         @min_items = min_items
         @max_items = max_items
         @unique = unique
         @columns = columns&.freeze
+        # For an `arr[] = @type` declaration, the entry fields come from this type.
+        @item_type_ref = item_type_ref&.freeze
         freeze
       end
     end

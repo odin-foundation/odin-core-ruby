@@ -201,9 +201,13 @@ module Odin
       # A field typed @SomeType enforces that type's required fields under the field
       # path, but only when the sub-object is present (or the field itself required).
       def check_field_typeref_required_fields
-        @schema.fields.each do |path, field|
-          next if path.end_with?("._composition")
+        @schema.fields.each do |raw_path, field|
+          next if raw_path.end_with?("._composition")
           next unless field.type_ref
+
+          # A field under the root {} header keys as ".field"; the document path
+          # has no leading dot.
+          path = raw_path.sub(/\A\./, "")
 
           member_names(field.type_ref).each do |member|
             type = lookup_type(member)
@@ -226,8 +230,66 @@ module Odin
                 expected: "present"
               )
             end
+
+            check_type_array_required_fields(path, type) if present
           end
         end
+      end
+
+      # Expand a referenced type's array-of-object entries under each present
+      # index so entry-level required markers fire only when the entry is present.
+      def check_type_array_required_fields(path, type)
+        return if type.arrays.nil? || type.arrays.empty?
+
+        type.arrays.each do |arr_name, schema_array|
+          item_fields = resolve_array_item_fields(schema_array)
+          next if item_fields.empty?
+
+          array_path = "#{path}.#{arr_name}"
+          present_array_indices(array_path).each do |idx|
+            item_fields.each do |fname, tfield|
+              next if fname == "_composition"
+              next unless tfield.required
+              next if tfield.computed
+
+              full = "#{array_path}[#{idx}].#{fname}"
+              next if doc_has_value?(full)
+
+              add_error(
+                code: Errors::ValidationErrorCode::REQUIRED_FIELD_MISSING,
+                path: full,
+                message: "Required field '#{full}' is missing",
+                expected: "present"
+              )
+            end
+          end
+        end
+      end
+
+      # Entry fields for an array: inline item fields, or the fields of the type
+      # named by item_type_ref (for the arr[] = @type form).
+      def resolve_array_item_fields(schema_array)
+        return schema_array.item_fields unless schema_array.item_fields.empty?
+
+        if schema_array.item_type_ref
+          member_names(schema_array.item_type_ref).each do |member|
+            type = lookup_type(member)
+            return type.fields if type
+          end
+        end
+        schema_array.item_fields
+      end
+
+      # Distinct indices present in the document under the given array path.
+      def present_array_indices(array_path)
+        seen = {}
+        prefix = "#{array_path}["
+        @doc.paths.each do |p|
+          next unless p.start_with?(prefix)
+          m = p[array_path.length..].match(/\A\[(\d+)\]/)
+          seen[m[1].to_i] = true if m
+        end
+        seen.keys.sort
       end
 
       # Split an &-joined type_ref (e.g. "@hasName&hasAge") into bare member names.

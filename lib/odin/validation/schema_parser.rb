@@ -73,6 +73,8 @@ module Odin
           end
         end
 
+        extract_type_arrays
+
         Types::OdinSchema.new(
           metadata: @metadata,
           types: @types,
@@ -81,6 +83,62 @@ module Odin
           imports: @imports,
           object_constraints: @object_constraints
         )
+      end
+
+      # Pull array-of-object entry fields out of each type's flat field map. A key
+      # `arr[]` (whose value is a type reference) becomes an array with an entry
+      # type ref; keys `arr[].field` become an array whose item fields are those
+      # fields. Matching keys are removed from the type's fields.
+      def extract_type_arrays
+        @types.each do |type_name, type|
+          builders = {}
+          remaining_fields = {}
+
+          type.fields.each do |key, field|
+            m = key.match(/\A([^\[\]]+)\[\](?:\.(.+))?\z/)
+            unless m
+              remaining_fields[key] = field
+              next
+            end
+
+            arr_name = m[1]
+            item_path = m[2]
+            b = builders[arr_name] ||= { item_fields: {}, item_type_ref: nil }
+
+            if item_path.nil?
+              # arr[] = @type  -> entry fields come from the referenced type
+              ref = field.type_ref
+              b[:item_type_ref] = ref if ref && ref != "array"
+            else
+              # arr[].item_path = field
+              b[:item_fields][item_path] = field
+            end
+          end
+
+          next if builders.empty?
+
+          arrays = {}
+          builders.each do |arr_name, b|
+            arrays[arr_name] = Types::SchemaArray.new(
+              path: arr_name,
+              item_fields: b[:item_fields],
+              unique: false,
+              item_type_ref: b[:item_type_ref]
+            )
+          end
+
+          @types[type_name] = Types::SchemaType.new(
+            name: type.name,
+            fields: remaining_fields,
+            namespace: type.namespace,
+            composition: type.composition,
+            base_type: type.base_type,
+            constraints: type.constraints,
+            intersection_types: type.intersection_types,
+            parent_types: type.parent_types,
+            arrays: arrays
+          )
+        end
       end
 
       private
@@ -453,6 +511,8 @@ module Odin
         end
 
         field_name = left
+        # Keep the raw left side so a type can retain its `[]` array markers.
+        raw_field_name = left
         # Strip array indicator from field names
         is_array_field = field_name.end_with?("[]")
         field_name = field_name[0...-2] if is_array_field
@@ -481,15 +541,20 @@ module Odin
         # Parse the field spec from the right side
         schema_field = parse_field_spec(full_path, right)
 
-        # Override type_ref for array fields
+        # Override type_ref for array fields. Inside a type, keep an entry type
+        # ref (arr[] = @entry) so it can be extracted into the type's arrays map.
         if is_array_field
+          array_type_ref = "array"
+          if @current_header_kind == :type && schema_field.type_ref
+            array_type_ref = schema_field.type_ref
+          end
           schema_field = Types::SchemaField.new(
             name: schema_field.name, field_type: schema_field.field_type,
             required: schema_field.required, nullable: schema_field.nullable,
             redacted: schema_field.redacted, deprecated: schema_field.deprecated,
             constraints: schema_field.constraints, conditionals: schema_field.conditionals,
             computed: schema_field.computed, immutable: schema_field.immutable,
-            type_ref: "array"
+            type_ref: array_type_ref
           )
         end
 
@@ -499,8 +564,10 @@ module Odin
           if @current_type_name && @types[@current_type_name]
             old_type = @types[@current_type_name]
             new_fields = old_type.fields.dup
+            # Keep `[]` markers so array-of-object entries can be extracted later.
+            key_name = raw_field_name
             # Relative sub-section ({.term}) prefixes the field key (e.g. term.effective)
-            type_key = @current_type_sub_path.empty? ? field_name : "#{@current_type_sub_path}.#{field_name}"
+            type_key = @current_type_sub_path.empty? ? key_name : "#{@current_type_sub_path}.#{key_name}"
             new_fields[type_key] = schema_field
             @types[@current_type_name] = Types::SchemaType.new(
               name: old_type.name,
