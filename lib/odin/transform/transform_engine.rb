@@ -6,6 +6,19 @@ module Odin
       # Verb registry — populated in Phase 9-10. For now, core verbs only.
       CORE_VERBS = {}.freeze
 
+      # Verbs whose cost grows with an array argument. Charged proportional to
+      # the array width so large-array work cannot escape the fuel budget.
+      SORT_VERBS = %w[sort].freeze
+      WIDTH_VERBS = %w[
+        distinct groupBy keyBy countBy reduce
+        sum avg min max count sumIf avgIf countIf
+        union intersection difference symmetricDifference
+        map filter window explode flatten reverse
+      ].freeze
+
+      # Read the wall clock once per this many charged units.
+      CLOCK_CHECK_INTERVAL = 1024
+
       class TransformError < StandardError
         attr_reader :code
         attr_accessor :segment, :field
@@ -43,9 +56,20 @@ module Odin
         end
       end
 
+      # Execution guard abort (fuel, timeout, or depth). Not downgraded by the
+      # onError policy; the execute boundary surfaces it as a failed result.
+      class TransformAbortError < StandardError
+        attr_reader :transform_error
+
+        def initialize(transform_error)
+          @transform_error = transform_error
+          super(transform_error.message)
+        end
+      end
+
       # ── Transform Error Codes ──
-      # T001-T010 are reserved for core transform errors.
-      # T011+ are for implementation-specific errors.
+      # T001-T018 are reserved for core transform errors.
+      # Later codes are for implementation-specific errors.
       module ErrorCodes
         T001_UNKNOWN_VERB            = "T001"
         T002_INVALID_VERB_ARGS       = "T002"
@@ -60,6 +84,33 @@ module Odin
         T011_INCOMPATIBLE_CONVERSION = "T011"
         T012_DANGLING_BRANCH         = "T012"
         T014_NESTED_INTERPOLATION    = "T014"
+        T016_TRANSFORM_BUDGET_EXCEEDED  = "T016"
+        T017_TRANSFORM_TIMEOUT_EXCEEDED = "T017"
+        T018_EXPRESSION_DEPTH_EXCEEDED  = "T018"
+      end
+
+      # Create a T016 Transform Budget Exceeded error.
+      def self.budget_exceeded_error(limit)
+        TransformError.new(
+          "Transform fuel budget exceeded (limit #{limit})",
+          code: ErrorCodes::T016_TRANSFORM_BUDGET_EXCEEDED
+        )
+      end
+
+      # Create a T017 Transform Timeout Exceeded error.
+      def self.timeout_exceeded_error(limit_ms)
+        TransformError.new(
+          "Transform timeout exceeded (limit #{limit_ms}ms)",
+          code: ErrorCodes::T017_TRANSFORM_TIMEOUT_EXCEEDED
+        )
+      end
+
+      # Create a T018 Expression Depth Exceeded error.
+      def self.expression_depth_exceeded_error(limit)
+        TransformError.new(
+          "Expression evaluation depth exceeded (limit #{limit})",
+          code: ErrorCodes::T018_EXPRESSION_DEPTH_EXCEEDED
+        )
       end
 
       # Create a T014 Nested Interpolation error.
@@ -132,9 +183,24 @@ module Odin
 
       def initialize
         @verb_registry = build_verb_registry
+        reset_guard!
+      end
+
+      # Reset execution-guard state for a single execute call. Fuel and timeout
+      # charge only when their cap is set (> 0); depth uses its standing default.
+      def reset_guard!
+        @fuel_cap = Utils::SecurityLimits.max_transform_fuel
+        @timeout_ms = Utils::SecurityLimits.transform_timeout_ms
+        @max_expr_depth = Utils::SecurityLimits.max_expression_depth
+        @fuel_used = 0
+        @expr_depth = 0
+        @ops_since_clock = 0
+        @start_time = @timeout_ms.positive? ? monotonic_ms : 0
       end
 
       def execute(transform_def, source_data, import_resolver: nil)
+        reset_guard!
+
         # Merge imported tables, constants, accumulators, and segments.
         if import_resolver && transform_def.imports && !transform_def.imports.empty?
           resolve_imports(transform_def, import_resolver)
@@ -159,23 +225,27 @@ module Odin
 
         # 3. Process segments (multi-pass support)
         output = {}
-        passes = transform_def.passes
-        if passes.empty?
-          # Single implicit pass
-          process_segment_list(transform_def.segments, source, context, output)
-        else
-          # Multi-pass: explicit passes first, then pass-0 (implicit)
-          all_passes = passes.include?(0) ? passes : passes + [0]
-          first_pass = true
-          all_passes.each do |pass_num|
-            unless first_pass
-              reset_non_persist_accumulators(context, transform_def.accumulators)
-            end
-            first_pass = false
+        begin
+          passes = transform_def.passes
+          if passes.empty?
+            # Single implicit pass
+            process_segment_list(transform_def.segments, source, context, output)
+          else
+            # Multi-pass: explicit passes first, then pass-0 (implicit)
+            all_passes = passes.include?(0) ? passes : passes + [0]
+            first_pass = true
+            all_passes.each do |pass_num|
+              unless first_pass
+                reset_non_persist_accumulators(context, transform_def.accumulators)
+              end
+              first_pass = false
 
-            pass_segments = transform_def.segments.select { |s| (s.pass || 0) == pass_num }
-            process_segment_list(pass_segments, source, context, output)
+              pass_segments = transform_def.segments.select { |s| (s.pass || 0) == pass_num }
+              process_segment_list(pass_segments, source, context, output)
+            end
           end
+        rescue TransformAbortError => e
+          return abort_result(e, output, context)
         end
 
         # 4. Apply confidential enforcement
@@ -229,44 +299,48 @@ module Odin
         end
 
         # Process each record/line
-        lines = raw_input.split(/[\r\n]+/)
-        lines.each do |line|
-          next if line.strip.empty?
+        begin
+          lines = raw_input.split(/[\r\n]+/)
+          lines.each do |line|
+            next if line.strip.empty?
 
-          disc_value = extract_discriminator_value(line, disc, delimiter)
-          segment = segment_map[disc_value]
-          next unless segment
+            disc_value = extract_discriminator_value(line, disc, delimiter)
+            segment = segment_map[disc_value]
+            next unless segment
 
-          record_source = parse_record(line, source_format, delimiter)
-          record_output = {}
+            record_source = parse_record(line, source_format, delimiter)
+            record_output = {}
 
-          # Set the record as the current source for path resolution
-          context.source = record_source
+            # Set the record as the current source for path resolution
+            context.source = record_source
 
-          # Process field mappings
-          segment.field_mappings.each do |mapping|
-            process_mapping(mapping, record_source, context, record_output)
-          end
+            # Process field mappings
+            segment.field_mappings.each do |mapping|
+              process_mapping(mapping, record_source, context, record_output)
+            end
 
-          # Process children
-          segment.children.each do |child|
-            process_segment(child, record_source, context, record_output)
-          end
+            # Process children
+            segment.children.each do |child|
+              process_segment(child, record_source, context, record_output)
+            end
 
-          # Merge into output
-          seg_name = segment.name
+            # Merge into output
+            seg_name = segment.name
 
-          if segment.is_array
-            array_accumulators[seg_name] ||= []
-            array_accumulators[seg_name] << record_output
-          else
-            # Merge fields into existing segment object
-            if output[seg_name].is_a?(Hash)
-              record_output.each { |k, v| output[seg_name][k] = v }
+            if segment.is_array
+              array_accumulators[seg_name] ||= []
+              array_accumulators[seg_name] << record_output
             else
-              output[seg_name] = record_output
+              # Merge fields into existing segment object
+              if output[seg_name].is_a?(Hash)
+                record_output.each { |k, v| output[seg_name][k] = v }
+              else
+                output[seg_name] = record_output
+              end
             end
           end
+        rescue TransformAbortError => e
+          return abort_result(e, output, context)
         end
 
         # Merge array accumulators into output in segment order
@@ -391,9 +465,84 @@ module Odin
         end
       end
 
+      # ── Execution Guard ──
+
+      # Surface a guard abort as a failed result; the abort is never raised past
+      # the execute boundary. The guard error joins context.errors so the result
+      # reports failure.
+      def abort_result(err, output, context)
+        context.errors << err.transform_error
+        plain_output = deep_to_ruby(output)
+        TransformResult.new(output: plain_output, formatted: "", errors: context.errors, warnings: context.warnings)
+      end
+
+      # Monotonic clock in milliseconds for the wall-clock guard.
+      def monotonic_ms
+        Process.clock_gettime(Process::CLOCK_MONOTONIC, :millisecond)
+      end
+
+      # Charge fuel and, at a coarse interval, the wall clock. Both are no-ops
+      # unless their cap is set (> 0), so unbounded transforms pay nothing.
+      def charge(units)
+        if @fuel_cap.positive?
+          @fuel_used += units
+          raise TransformAbortError.new(self.class.budget_exceeded_error(@fuel_cap)) if @fuel_used > @fuel_cap
+        end
+        return unless @timeout_ms.positive?
+
+        @ops_since_clock += units
+        return if @ops_since_clock < CLOCK_CHECK_INTERVAL
+
+        @ops_since_clock = 0
+        return unless monotonic_ms - @start_time > @timeout_ms
+
+        raise TransformAbortError.new(self.class.timeout_exceeded_error(@timeout_ms))
+      end
+
+      # Charge width for a verb doing O(n)/O(n log n) work over an array argument,
+      # so large-array work cannot escape the budget at a flat unit. Runs when
+      # fuel OR timeout is set, so a timeout-only host can interrupt wide verbs.
+      def charge_verb_width(verb, args)
+        return if @fuel_cap <= 0 && @timeout_ms <= 0
+
+        n = first_array_width(args)
+        return if n <= 0
+
+        if SORT_VERBS.include?(verb)
+          charge(n * Math.log2([n, 2].max).ceil)
+        elsif WIDTH_VERBS.include?(verb)
+          charge(n)
+        end
+      end
+
+      # Width of the first array-typed argument, or 0 if none.
+      def first_array_width(args)
+        args.each do |arg|
+          return arg.value.length if arg.is_a?(Types::DynValue) && arg.array?
+        end
+        0
+      end
+
       # ── Expression Evaluation ──
 
+      # Guard boundary: enforce depth, charge one base unit of fuel, and batch the
+      # wall-clock check before delegating to the evaluator. All evaluation paths
+      # funnel through here, so charging stays concentrated at this single point.
       def evaluate(expr, context)
+        @expr_depth += 1
+        if @expr_depth > @max_expr_depth
+          @expr_depth -= 1
+          raise TransformAbortError.new(self.class.expression_depth_exceeded_error(@max_expr_depth))
+        end
+        charge(1)
+        begin
+          evaluate_inner(expr, context)
+        ensure
+          @expr_depth -= 1
+        end
+      end
+
+      def evaluate_inner(expr, context)
         case expr
         when LiteralExpr
           val = expr.value
@@ -1111,6 +1260,8 @@ module Odin
         if target.start_with?("_")
           begin
             evaluate(mapping.expression, context)
+          rescue TransformAbortError
+            raise
           rescue StandardError => e
             context.errors << TransformError.new(e.message)
           end
@@ -1227,6 +1378,9 @@ module Odin
           # Store DynValue directly to preserve type information (date, timestamp, etc.)
           dv_val = val.is_a?(Types::DynValue) ? val : Types::DynValue.from_ruby(val)
           set_path(output, target, dv_val)
+        rescue TransformAbortError
+          # Guard aborts are not downgraded by onError.
+          raise
         rescue CodedTransformError => e
           # Coded errors carry a stable T-code; preserve it under fail/warn.
           coded = e.transform_error
@@ -1555,6 +1709,7 @@ module Odin
           end
           val
         end
+        charge_verb_width(verb_name, evaluated_args)
 
         # Special handling for accumulate/set
         case verb_name
@@ -1589,6 +1744,7 @@ module Odin
 
         # Eager evaluation for all other verbs
         evaluated_args = args.map { |arg| evaluate(arg, context) }
+        charge_verb_width(verb_name, evaluated_args)
 
         # Special handling for accumulate/set
         case verb_name
