@@ -174,8 +174,14 @@ module Odin
       Transform::TransformParser.new.parse(text)
     end
 
-    def execute_transform(transform_def, source, import_resolver: nil)
-      Transform::TransformEngine.new.execute(transform_def, source, import_resolver: import_resolver)
+    def execute_transform(transform_def, source, import_resolver: nil,
+                          max_transform_fuel: nil, transform_timeout_ms: nil, max_expression_depth: nil)
+      Transform::TransformEngine.new.execute(
+        transform_def, source, import_resolver: import_resolver,
+        max_transform_fuel: max_transform_fuel,
+        transform_timeout_ms: transform_timeout_ms,
+        max_expression_depth: max_expression_depth
+      )
     end
 
     def transform(transform_text, source)

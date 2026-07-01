@@ -188,18 +188,22 @@ module Odin
 
       # Reset execution-guard state for a single execute call. Fuel and timeout
       # charge only when their cap is set (> 0); depth uses its standing default.
-      def reset_guard!
-        @fuel_cap = Utils::SecurityLimits.max_transform_fuel
-        @timeout_ms = Utils::SecurityLimits.transform_timeout_ms
-        @max_expr_depth = Utils::SecurityLimits.max_expression_depth
+      # A per-call value overrides the global limit; nil falls back to it.
+      def reset_guard!(max_transform_fuel: nil, transform_timeout_ms: nil, max_expression_depth: nil)
+        @fuel_cap = max_transform_fuel.nil? ? Utils::SecurityLimits.max_transform_fuel : max_transform_fuel
+        @timeout_ms = transform_timeout_ms.nil? ? Utils::SecurityLimits.transform_timeout_ms : transform_timeout_ms
+        @max_expr_depth = max_expression_depth.nil? ? Utils::SecurityLimits.max_expression_depth : max_expression_depth
         @fuel_used = 0
         @expr_depth = 0
         @ops_since_clock = 0
         @start_time = @timeout_ms.positive? ? monotonic_ms : 0
       end
 
-      def execute(transform_def, source_data, import_resolver: nil)
-        reset_guard!
+      def execute(transform_def, source_data, import_resolver: nil,
+                  max_transform_fuel: nil, transform_timeout_ms: nil, max_expression_depth: nil)
+        reset_guard!(max_transform_fuel: max_transform_fuel,
+                     transform_timeout_ms: transform_timeout_ms,
+                     max_expression_depth: max_expression_depth)
 
         # Merge imported tables, constants, accumulators, and segments.
         if import_resolver && transform_def.imports && !transform_def.imports.empty?

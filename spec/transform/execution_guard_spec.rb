@@ -97,6 +97,44 @@ RSpec.describe "transform execution guard" do
     end
   end
 
+  describe "per-call overrides" do
+    it "applies a per-call fuel budget when no global limit is set" do
+      r = engine.execute(parser.parse(base_header + %({out}\nr = %sort @big)),
+                         { "big" => descending(200) }, max_transform_fuel: 50)
+      expect(r.success?).to be(false)
+      expect(r.errors.map(&:code)).to include("T016")
+    end
+
+    it "overrides the global fuel limit for this call" do
+      ENV["ODIN_MAX_TRANSFORM_FUEL"] = "50"
+      r = engine.execute(parser.parse(base_header + %({out}\nr = %sort @big)),
+                         { "big" => descending(200) }, max_transform_fuel: 1_000_000)
+      expect(r.success?).to be(true)
+    end
+
+    it "a per-call 0 opts a single call out of a global fuel cap" do
+      ENV["ODIN_MAX_TRANSFORM_FUEL"] = "50"
+      r = engine.execute(parser.parse(base_header + %({out}\nr = %sort @big)),
+                         { "big" => descending(200) }, max_transform_fuel: 0)
+      expect(r.success?).to be(true)
+    end
+
+    it "applies a per-call expression-depth cap" do
+      r = engine.execute(parser.parse(base_header + nest_abs(30)), {}, max_expression_depth: 8)
+      expect(r.success?).to be(false)
+      expect(r.errors.map(&:code)).to include("T018")
+    end
+
+    it "applies a per-call timeout" do
+      clock = 0
+      allow(engine).to receive(:monotonic_ms) { clock += 10_000 }
+      r = engine.execute(parser.parse(base_header + %({out}\nr = %sort @big)),
+                         { "big" => descending(2000) }, transform_timeout_ms: 100)
+      expect(r.success?).to be(false)
+      expect(r.errors.map(&:code)).to include("T017")
+    end
+  end
+
   describe "non-swallowable abort" do
     it "is not downgraded to a warning by onError" do
       ENV["ODIN_MAX_TRANSFORM_FUEL"] = "50"
